@@ -2,9 +2,9 @@
 ///
 /// @file core/shape/gaussiansplat.cpp
 ///
-/// Experimental 3D Gaussian Splatting cloud: BVH traversal, soft Gaussian
-/// weight along the ray (peak / Kerbl Jacobian EWA / Vol3DGS volume α), SH colour,
-/// front-to-back alpha compositing. Offline CPU path via IntegrateAlongRay.
+/// Experimental 3D Gaussian Splatting cloud: samples==2 uses SuperSplat-style
+/// project / tile / depth-sort / 2D EWA blend (CPU). samples<=1 peak and
+/// samples>=3 Vol3DGS remain along-ray (GI / hybrid).
 ///
 //******************************************************************************
 
@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include "core/bounding/boundingbox.h"
 #include "core/material/pigment.h"
@@ -53,11 +54,45 @@ const DBL kWeightEps = 1.0e-4;
 const int kDefaultMaxHits = 65536;
 const int kHardMaxHits = 262144;
 const DBL kExtentSigma = 3.0;
+/// SuperSplat quad edge at UV=1 ⇒ mahalanobis² = 8 (2√2 σ); match their cull.
+const DBL kProjPowerCull = 8.0;
+const int kProjTileSize = 16;
+/// SuperSplat editor default: drop splats whose major axis is under 2 px.
+const DBL kProjMinPixelSize = 2.0;
+/// Drop absurd screen footprints (keeps side fog discs from dominating empty pixels).
+const DBL kProjMaxAxisPx = 128.0;
+/// Drop world-space scale outliers (Rose p95 ≈ 0.13).
+const DBL kProjMaxWorldScale = 0.12;
+/// Drop spatial outliers outside the dense core (percentile box + margin).
+const DBL kProjOutlierPercentile = 0.92;
+const DBL kProjOutlierMargin = 0.08;
+/// Minimum 3D neighbors within radius — isolated floaters make fog/glare.
+const int kProjMinNeighbors = 6;
+const DBL kProjNeighborRadius = 0.12;
 const DBL kSqrtTwoPi = 2.5066282746310002; // √(2π)
+const DBL kExpNeg4 = 0.01831563888873418; // e^{-4}
+const DBL kInvOneMinusExpNeg4 = 1.0 / (1.0 - 0.01831563888873418);
 
 inline DBL Clamp01(DBL v)
 {
     return (v < 0.0) ? 0.0 : ((v > 1.0) ? 1.0 : v);
+}
+
+/// SuperSplat fragment falloff: remaps exp(-4 r²) so the quad edge is exactly 0.
+inline DBL NormExpPower(DBL power)
+{
+    // power = mahalanobis²; at UV edge power=8 ⇒ exp(-0.5*8)=e^{-4}.
+    const DBL g = std::exp(-0.5 * power);
+    return Clamp01((g - kExpNeg4) * kInvOneMinusExpNeg4);
+}
+
+/// Display encode for PNG/pigment: keep [0,1] linear, soft-knee HDR above 1.
+inline Vector3d TonemapSplatRgb(const Vector3d& c)
+{
+    return Vector3d(
+        (c[X] <= 1.0) ? Clamp01(c[X]) : (1.0 - 1.0 / (1.0 + c[X])),
+        (c[Y] <= 1.0) ? Clamp01(c[Y]) : (1.0 - 1.0 / (1.0 + c[Y])),
+        (c[Z] <= 1.0) ? Clamp01(c[Z]) : (1.0 - 1.0 / (1.0 + c[Z])));
 }
 
 void QuatToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
@@ -208,6 +243,11 @@ void GaussianSplatCloud::Transform(const TRANSFORM *tr)
     if (Trans == nullptr)
         Trans = Create_Transform();
     Compose_Transforms(Trans, tr);
+    {
+        std::lock_guard<std::mutex> lock(projCacheMutex);
+        projCache.valid = false;
+        projCache.entries.clear();
+    }
     Compute_BBox();
 }
 
@@ -422,12 +462,12 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
                 }
             }
 
-            // J (2×3): affine approx of projective transform at mean (Kerbl et al.).
+            // J (2×3): match SuperSplat / PlayCanvas projector (positive perspective terms).
             const DBL fx = proj->fx, fy = proj->fy;
             const DBL invZ = 1.0 / tz;
             const DBL invZ2 = invZ * invZ;
-            const DBL J00 = fx * invZ, J02 = -fx * tx * invZ2;
-            const DBL J11 = fy * invZ, J12 = -fy * ty * invZ2;
+            const DBL J00 = fx * invZ, J02 = fx * tx * invZ2;
+            const DBL J11 = fy * invZ, J12 = fy * ty * invZ2;
 
             // cov2d = J * Σ_cam * Jᵀ  (2×2), then +0.3 px low-pass on diagonal.
             auto Sj = [&](int row, int colJ) -> DBL {
@@ -548,7 +588,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
 
 void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const
 {
-    // viewDir should point from splat toward camera (opposite of ray direction).
+    // viewDir = camera → splat (SuperSplat / Inria convention).
     Vector3d dir = viewDir.normalized();
     const DBL x = dir[X], y = dir[Y], z = dir[Z];
 
@@ -560,13 +600,18 @@ void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d
     const int deg = std::min(shDegree, 3);
     if (deg < 1 || restCount < 9 || restCoeffs.empty())
     {
-        rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+        rgb = Vector3d(std::max(0.0, rgb[X]), std::max(0.0, rgb[Y]), std::max(0.0, rgb[Z]));
         return;
     }
 
     const DBL *rest = &restCoeffs[sp.restOffset];
+    // Inria / SuperSplat PLY: f_rest is channel-major — all R bands, then G, then B.
+    // numBands = restCount/3 (3 / 8 / 15 for degree 1 / 2 / 3).
+    const unsigned numBands = restCount / 3;
     auto band = [&](int b, int c) -> DBL {
-        const unsigned idx = static_cast<unsigned>(b * 3 + c);
+        if (b < 0 || static_cast<unsigned>(b) >= numBands || c < 0 || c > 2)
+            return 0.0;
+        const unsigned idx = static_cast<unsigned>(c) * numBands + static_cast<unsigned>(b);
         return (idx < restCount) ? rest[idx] : 0.0;
     };
 
@@ -609,7 +654,8 @@ void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d
         add3(14, kShC3[6] * x * (xx - 3.0 * yy));
     }
 
-    rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+    // Keep HDR for compositing (SuperSplat allows up to ~8); only floor negatives.
+    rgb = Vector3d(std::max(0.0, rgb[X]), std::max(0.0, rgb[Y]), std::max(0.0, rgb[Z]));
 }
 
 bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3d& dir,
@@ -726,7 +772,384 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
             continue;
         const GaussianSplatPoint& spoint = points[static_cast<size_t>(hits[i].idx)];
         Vector3d rgb;
-        EvalColour(spoint, viewDir, rgb);
+        // SH expects camera→splat (SuperSplat); viewDir arg is toward camera.
+        Vector3d camToSplat = spoint.position - origin;
+        if (camToSplat.lengthSqr() > EPSILON)
+            camToSplat.normalize();
+        else
+            camToSplat = -viewDir;
+        EvalColour(spoint, camToSplat, rgb);
+        acc += rgb * (alpha * T);
+        const DBL contrib = alpha * T;
+        depthSum += hits[i].t * contrib;
+        depthW += contrib;
+        T *= (1.0 - alpha);
+    }
+
+    const DBL alphaOut = Clamp01(1.0 - T);
+    if (alphaOut < opacityCutoff)
+        return false;
+
+    out.colour = acc;
+    out.transmittance = T;
+    out.depth = (depthW > EPSILON) ? (depthSum / depthW) : hits[0].t;
+    out.valid = true;
+    return true;
+}
+
+bool GaussianSplatCloud::EnsureProjectedCache(const GaussianSplatCamBasis& cam) const
+{
+    if (!cam.camValid)
+        return false;
+
+    std::lock_guard<std::mutex> lock(projCacheMutex);
+    auto sameVec = [](const Vector3d& a, const Vector3d& b) {
+        return std::fabs(a[X] - b[X]) < 1.0e-9 &&
+               std::fabs(a[Y] - b[Y]) < 1.0e-9 &&
+               std::fabs(a[Z] - b[Z]) < 1.0e-9;
+    };
+    if (projCache.valid &&
+        sameVec(projCache.origin, cam.origin) &&
+        sameVec(projCache.right, cam.right) &&
+        sameVec(projCache.up, cam.up) &&
+        sameVec(projCache.forward, cam.forward) &&
+        std::fabs(projCache.fx - cam.fx) < 1.0e-6 &&
+        std::fabs(projCache.fy - cam.fy) < 1.0e-6)
+    {
+        return !projCache.entries.empty();
+    }
+
+    BuildProjectedCache(cam);
+    return projCache.valid && !projCache.entries.empty();
+}
+
+void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) const
+{
+    projCache.valid = false;
+    projCache.entries.clear();
+    projCache.tileOffsets.clear();
+    projCache.tileIndices.clear();
+    projCache.origin = cam.origin;
+    projCache.right = cam.right;
+    projCache.up = cam.up;
+    projCache.forward = cam.forward;
+    projCache.fx = cam.fx;
+    projCache.fy = cam.fy;
+    projCache.tileSize = kProjTileSize;
+
+    if (points.empty() || cam.fx <= EPSILON || cam.fy <= EPSILON)
+        return;
+
+    // Dense-core AABB from percentiles — kills fog/glare floaters outside the bouquet.
+    std::vector<DBL> xs, ys, zs;
+    xs.reserve(points.size());
+    ys.reserve(points.size());
+    zs.reserve(points.size());
+    for (size_t pi = 0; pi < points.size(); ++pi)
+    {
+        Vector3d pos = points[pi].position;
+        if (Trans != nullptr)
+            MTransPoint(pos, points[pi].position, Trans);
+        xs.push_back(pos[X]);
+        ys.push_back(pos[Y]);
+        zs.push_back(pos[Z]);
+    }
+    auto percentile = [](std::vector<DBL>& v, DBL p) -> DBL {
+        if (v.empty()) return 0.0;
+        std::sort(v.begin(), v.end());
+        const DBL idx = p * static_cast<DBL>(v.size() - 1);
+        const size_t i0 = static_cast<size_t>(idx);
+        const size_t i1 = std::min(i0 + 1, v.size() - 1);
+        const DBL t = idx - static_cast<DBL>(i0);
+        return v[i0] * (1.0 - t) + v[i1] * t;
+    };
+    const DBL plo = (1.0 - kProjOutlierPercentile) * 0.5;
+    const DBL phi = 1.0 - plo;
+    std::vector<DBL> x2 = xs, y2 = ys, z2 = zs;
+    DBL xLo = percentile(x2, plo), xHi = percentile(x2, phi);
+    DBL yLo = percentile(y2, plo), yHi = percentile(y2, phi);
+    DBL zLo = percentile(z2, plo), zHi = percentile(z2, phi);
+    const DBL xPad = (xHi - xLo) * kProjOutlierMargin + 1.0e-3;
+    const DBL yPad = (yHi - yLo) * kProjOutlierMargin + 1.0e-3;
+    const DBL zPad = (zHi - zLo) * kProjOutlierMargin + 1.0e-3;
+    xLo -= xPad; xHi += xPad;
+    yLo -= yPad; yHi += yPad;
+    zLo -= zPad; zHi += zPad;
+
+    // Neighbor density (view-independent): isolated Gaussians are fog floaters.
+    std::vector<int> nbr(points.size(), 0);
+    {
+        const DBL R2 = kProjNeighborRadius * kProjNeighborRadius;
+        std::vector<Vector3d> wpos(points.size());
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            wpos[i] = points[i].position;
+            if (Trans != nullptr)
+                MTransPoint(wpos[i], points[i].position, Trans);
+        }
+        for (size_t i = 0; i < points.size(); ++i)
+        {
+            for (size_t j = i + 1; j < points.size(); ++j)
+            {
+                const Vector3d d = wpos[i] - wpos[j];
+                if (dot(d, d) < R2)
+                {
+                    ++nbr[i];
+                    ++nbr[j];
+                }
+            }
+        }
+    }
+
+    projCache.entries.reserve(points.size());
+
+    DBL minU = BOUND_HUGE, maxU = -BOUND_HUGE, minV = BOUND_HUGE, maxV = -BOUND_HUGE;
+    std::vector<DBL> extents;
+    extents.reserve(points.size());
+
+    for (size_t pi = 0; pi < points.size(); ++pi)
+    {
+        const GaussianSplatPoint& sp = points[pi];
+        const DBL opac = Clamp01(sp.opacity * opacityScale);
+        if (opac < opacityCutoff)
+            continue;
+        if (nbr[pi] < kProjMinNeighbors)
+            continue;
+
+        Vector3d pos = sp.position;
+        if (Trans != nullptr)
+            MTransPoint(pos, sp.position, Trans);
+
+        if (pos[X] < xLo || pos[X] > xHi || pos[Y] < yLo || pos[Y] > yHi ||
+            pos[Z] < zLo || pos[Z] > zHi)
+            continue;
+
+        const Vector3d rel = pos - cam.origin;
+        const DBL tx = dot(rel, cam.right);
+        const DBL ty = dot(rel, cam.up);
+        const DBL tz = dot(rel, cam.forward);
+        if (tz <= EPSILON)
+            continue;
+
+        MATRIX Rmat;
+        QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
+        const DBL sx = std::max(sp.scale[X], EPSILON);
+        const DBL sy = std::max(sp.scale[Y], EPSILON);
+        const DBL sz = std::max(sp.scale[Z], EPSILON);
+        // Oversized world Gaussians paint soft fog discs around the bouquet.
+        if (std::max(sx, std::max(sy, sz)) > kProjMaxWorldScale)
+            continue;
+
+        // Σ_world = R S² Rᵀ
+        DBL SigmaW[3][3];
+        {
+            const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    SigmaW[i][j] = Rmat[i][0] * s2x * Rmat[j][0]
+                                 + Rmat[i][1] * s2y * Rmat[j][1]
+                                 + Rmat[i][2] * s2z * Rmat[j][2];
+        }
+
+        // Σ_cam = W Σ_world Wᵀ  (rows of W = camera axes)
+        const Vector3d axes[3] = { cam.right, cam.up, cam.forward };
+        DBL SigmaC[3][3];
+        for (int i = 0; i < 3; ++i)
+        {
+            for (int j = 0; j < 3; ++j)
+            {
+                DBL s = 0.0;
+                for (int a = 0; a < 3; ++a)
+                {
+                    DBL WaS = 0.0;
+                    for (int b = 0; b < 3; ++b)
+                        WaS += axes[i][b] * SigmaW[b][a];
+                    s += WaS * axes[j][a];
+                }
+                SigmaC[i][j] = s;
+            }
+        }
+
+        const DBL invZ = 1.0 / tz;
+        const DBL invZ2 = invZ * invZ;
+        const DBL jx0 = cam.fx * invZ, jx2 = cam.fx * tx * invZ2;
+        const DBL jy1 = cam.fy * invZ, jy2 = cam.fy * ty * invZ2;
+
+        auto Sj = [&](int row, int colJ) -> DBL {
+            if (colJ == 0)
+                return SigmaC[row][0] * jx0 + SigmaC[row][2] * jx2;
+            return SigmaC[row][1] * jy1 + SigmaC[row][2] * jy2;
+        };
+        DBL cov00 = jx0 * Sj(0, 0) + jx2 * Sj(2, 0);
+        DBL cov01 = jx0 * Sj(0, 1) + jx2 * Sj(2, 1);
+        DBL cov11 = jy1 * Sj(1, 1) + jy2 * Sj(2, 1);
+        cov00 += 0.3;
+        cov11 += 0.3;
+        const DBL det = cov00 * cov11 - cov01 * cov01;
+        if (det <= EPSILON)
+            continue;
+
+        const DBL mid = 0.5 * (cov00 + cov11);
+        const DBL rad = std::sqrt(std::max(0.0, 0.25 * (cov00 - cov11) * (cov00 - cov11) + cov01 * cov01));
+        const DBL lambda1 = mid + rad;
+        const DBL lambda2 = std::max(mid - rad, 0.1);
+        const DBL len1 = 2.0 * std::sqrt(2.0 * lambda1);
+        const DBL len2 = 2.0 * std::sqrt(2.0 * lambda2);
+        if (len1 < kProjMinPixelSize)
+            continue;
+        if (len1 > kProjMaxAxisPx)
+            continue;
+        const DBL extent = len1 + len2;
+
+        const DBL meanU = cam.fx * tx * invZ;
+        const DBL meanV = cam.fy * ty * invZ;
+
+        Vector3d rgb;
+        Vector3d camToSplat = rel;
+        camToSplat.normalize();
+        EvalColour(sp, camToSplat, rgb);
+        rgb = TonemapSplatRgb(rgb);
+
+        ProjEntry e;
+        e.meanU = meanU;
+        e.meanV = meanV;
+        e.cov00 = cov00;
+        e.cov01 = cov01;
+        e.cov11 = cov11;
+        e.depth = tz;
+        e.alpha = opac;
+        e.r = rgb[X];
+        e.g = rgb[Y];
+        e.b = rgb[Z];
+        projCache.entries.push_back(e);
+        extents.push_back(extent);
+
+        minU = std::min(minU, meanU - extent);
+        maxU = std::max(maxU, meanU + extent);
+        minV = std::min(minV, meanV - extent);
+        maxV = std::max(maxV, meanV + extent);
+    }
+
+    if (projCache.entries.empty())
+    {
+        projCache.valid = true;
+        return;
+    }
+
+    // Pad and build tile grid.
+    const DBL pad = static_cast<DBL>(kProjTileSize);
+    minU -= pad; maxU += pad; minV -= pad; maxV += pad;
+    projCache.tileOriginU = minU;
+    projCache.tileOriginV = minV;
+    const DBL spanU = std::max(maxU - minU, static_cast<DBL>(kProjTileSize));
+    const DBL spanV = std::max(maxV - minV, static_cast<DBL>(kProjTileSize));
+    projCache.tilesX = std::max(1, static_cast<int>(std::ceil(spanU / kProjTileSize)));
+    projCache.tilesY = std::max(1, static_cast<int>(std::ceil(spanV / kProjTileSize)));
+    const int nTiles = projCache.tilesX * projCache.tilesY;
+
+    std::vector<std::vector<int>> buckets(static_cast<size_t>(nTiles));
+    for (size_t i = 0; i < projCache.entries.size(); ++i)
+    {
+        const ProjEntry& e = projCache.entries[i];
+        const DBL ext = extents[i];
+        const int x0 = std::max(0, static_cast<int>(std::floor((e.meanU - ext - minU) / kProjTileSize)));
+        const int x1 = std::min(projCache.tilesX - 1, static_cast<int>(std::floor((e.meanU + ext - minU) / kProjTileSize)));
+        const int y0 = std::max(0, static_cast<int>(std::floor((e.meanV - ext - minV) / kProjTileSize)));
+        const int y1 = std::min(projCache.tilesY - 1, static_cast<int>(std::floor((e.meanV + ext - minV) / kProjTileSize)));
+        for (int ty = y0; ty <= y1; ++ty)
+            for (int tx = x0; tx <= x1; ++tx)
+                buckets[static_cast<size_t>(ty * projCache.tilesX + tx)].push_back(static_cast<int>(i));
+    }
+
+    projCache.tileOffsets.resize(static_cast<size_t>(nTiles + 1));
+    size_t total = 0;
+    for (int t = 0; t < nTiles; ++t)
+    {
+        projCache.tileOffsets[static_cast<size_t>(t)] = static_cast<int>(total);
+        total += buckets[static_cast<size_t>(t)].size();
+    }
+    projCache.tileOffsets[static_cast<size_t>(nTiles)] = static_cast<int>(total);
+    projCache.tileIndices.resize(total);
+    for (int t = 0; t < nTiles; ++t)
+    {
+        const int base = projCache.tileOffsets[static_cast<size_t>(t)];
+        const auto& b = buckets[static_cast<size_t>(t)];
+        for (size_t k = 0; k < b.size(); ++k)
+            projCache.tileIndices[static_cast<size_t>(base) + k] = b[k];
+    }
+
+    projCache.valid = true;
+}
+
+bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
+                                                 GaussianSplatSegmentResult& out,
+                                                 TraceThreadData *Thread) const
+{
+    out.colour = Vector3d(0.0, 0.0, 0.0);
+    out.transmittance = 1.0;
+    out.depth = 0.0;
+    out.valid = false;
+
+    std::lock_guard<std::mutex> lock(projCacheMutex);
+    if (!projCache.valid || projCache.entries.empty() || Thread == nullptr)
+        return false;
+
+    const int tx = static_cast<int>(std::floor((screenU - projCache.tileOriginU) / projCache.tileSize));
+    const int ty = static_cast<int>(std::floor((screenV - projCache.tileOriginV) / projCache.tileSize));
+    if (tx < 0 || ty < 0 || tx >= projCache.tilesX || ty >= projCache.tilesY)
+        return false;
+
+    const int tile = ty * projCache.tilesX + tx;
+    const int begin = projCache.tileOffsets[static_cast<size_t>(tile)];
+    const int end = projCache.tileOffsets[static_cast<size_t>(tile + 1)];
+    if (begin >= end)
+        return false;
+
+    std::vector<TraceThreadData::GaussianSplatHitRec>& hits = Thread->GaussianSplatHits;
+    hits.clear();
+    const int hitCap = std::min(kHardMaxHits, (maxHits > 0) ? maxHits : kDefaultMaxHits);
+    hits.reserve(static_cast<size_t>(std::min(end - begin, hitCap)));
+
+    for (int ii = begin; ii < end && static_cast<int>(hits.size()) < hitCap; ++ii)
+    {
+        const int ei = projCache.tileIndices[static_cast<size_t>(ii)];
+        const ProjEntry& e = projCache.entries[static_cast<size_t>(ei)];
+        const DBL du = screenU - e.meanU;
+        const DBL dv = screenV - e.meanV;
+        const DBL det = e.cov00 * e.cov11 - e.cov01 * e.cov01;
+        if (det <= EPSILON)
+            continue;
+        const DBL power = (e.cov11 * du * du - 2.0 * e.cov01 * du * dv + e.cov00 * dv * dv) / det;
+        if (power > kProjPowerCull)
+            continue;
+        const DBL g = NormExpPower(power);
+        const DBL alpha = Clamp01(e.alpha * g);
+        if (alpha < opacityCutoff)
+            continue;
+        TraceThreadData::GaussianSplatHitRec rec;
+        rec.t = e.depth;
+        rec.w = alpha;
+        rec.idx = ei; // index into projCache.entries (colour baked in)
+        hits.push_back(rec);
+    }
+
+    if (hits.empty())
+        return false;
+
+    std::sort(hits.begin(), hits.end(),
+              [](const TraceThreadData::GaussianSplatHitRec& a, const TraceThreadData::GaussianSplatHitRec& b) {
+                  return a.t < b.t; // near first → front-to-back
+              });
+
+    Vector3d acc(0.0, 0.0, 0.0);
+    DBL T = 1.0;
+    DBL depthSum = 0.0;
+    DBL depthW = 0.0;
+    for (size_t i = 0; i < hits.size() && T > (1.0 - alphaStop); ++i)
+    {
+        const ProjEntry& e = projCache.entries[static_cast<size_t>(hits[i].idx)];
+        const DBL alpha = hits[i].w;
+        const Vector3d rgb(e.r, e.g, e.b);
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
         depthSum += hits[i].t * contrib;
@@ -768,8 +1191,59 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     const Vector3d viewDir = -dir;
 
     GaussianSplatSegmentResult seg;
-    const bool useKerbl = ray.IsPrimaryRay() && Thread != nullptr &&
-                          Thread->GaussianSplatCam.camValid && Thread->GaussianSplatCam.pixelValid;
+    const bool primaryProj = ray.IsPrimaryRay() && Thread != nullptr &&
+                             Thread->GaussianSplatCam.camValid && Thread->GaussianSplatCam.pixelValid;
+
+    // samples == 2: SuperSplat project/sort/blend (CPU) for primary rays.
+    // Do NOT fall back to 3D BVH integration — that reintroduces large floaters
+    // the projected culls already dropped (fog/glare outside the subject).
+    if (samples == 2 && primaryProj)
+    {
+        GaussianSplatCamBasis cam;
+        cam.origin = Thread->GaussianSplatCam.origin;
+        cam.right = Thread->GaussianSplatCam.right;
+        cam.up = Thread->GaussianSplatCam.up;
+        cam.forward = Thread->GaussianSplatCam.forward;
+        cam.fx = Thread->GaussianSplatCam.fx;
+        cam.fy = Thread->GaussianSplatCam.fy;
+        cam.screenU = Thread->GaussianSplatCam.screenU;
+        cam.screenV = Thread->GaussianSplatCam.screenV;
+        cam.camValid = true;
+        cam.pixelValid = true;
+        if (!EnsureProjectedCache(cam))
+            return false;
+        if (!CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread))
+            return false;
+
+        // View depth along camera forward → ray distance.
+        const Vector3d rayDir = Vector3d(ray.Direction).normalized();
+        const DBL cosFwd = dot(rayDir, cam.forward);
+        if (cosFwd < 1.0e-6)
+            return false;
+        const DBL rayT = seg.depth / cosFwd;
+        if (rayT < kDepthTolerance || rayT > MAX_DISTANCE)
+            return false;
+        Vector3d IPoint = ray.Evaluate(rayT);
+        if (!(Clip.empty() || Point_In_Clip(IPoint, Clip, Thread)))
+            return false;
+
+        const DBL alphaOut = Clamp01(1.0 - seg.transmittance);
+        Vector3d rgb = seg.colour;
+        if (alphaOut > EPSILON)
+            rgb /= alphaOut;
+        rgb = TonemapSplatRgb(rgb);
+
+        Thread->GaussianSplatColourValid = true;
+        Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
+
+        Vector3d n = -ray.Direction;
+        Intersection isect(rayT, IPoint, n, this);
+        isect.haveNormal = true;
+        Depth_Stack->push(isect);
+        return true;
+    }
+
+    const bool useKerbl = primaryProj;
     if (!IntegrateAlongRay(origin, dir, kDepthTolerance, BOUND_HUGE, viewDir, seg, Thread, useKerbl))
         return false;
 
@@ -786,7 +1260,7 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     Vector3d rgb = seg.colour;
     if (alphaOut > EPSILON)
         rgb /= alphaOut;
-    rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+    rgb = TonemapSplatRgb(rgb);
 
     Thread->GaussianSplatColourValid = true;
     Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));

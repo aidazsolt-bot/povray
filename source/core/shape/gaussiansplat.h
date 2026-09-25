@@ -4,10 +4,9 @@
 ///
 /// Declarations for an experimental 3D Gaussian Splatting cloud primitive.
 ///
-/// Stores packed Inria/graphdeco-style Gaussians and composites soft splat
-/// contributions along a ray (BVH + SH colour + front-to-back alpha), returning
-/// a single emission hit for POV-Ray's surface shader. Also exposes
-/// IntegrateAlongRay for offline segment integration (primary + bounce/GI).
+/// Stores packed Inria/graphdeco-style Gaussians. Primary path for samples==2:
+/// SuperSplat/Kerbl project → tile → depth-sort → 2D EWA blend (CPU). Also
+/// supports peak (1) / volume (>=3) along-ray integration for GI/hybrid.
 ///
 //******************************************************************************
 
@@ -17,12 +16,25 @@
 #include "core/configcore.h"
 #include "core/scene/object.h"
 
+#include <mutex>
 #include <vector>
 
 namespace pov
 {
 
 #define GAUSSIAN_SPLAT_OBJECT (PATCH_OBJECT)
+
+/// Camera basis for screen-space projection (mirrors TraceThreadData::GaussianSplatProj).
+struct GaussianSplatCamBasis final
+{
+    Vector3d origin, right, up, forward;
+    DBL fx, fy;
+    DBL screenU, screenV;
+    bool camValid;
+    bool pixelValid;
+    GaussianSplatCamBasis() :
+        fx(1), fy(1), screenU(0), screenV(0), camValid(false), pixelValid(false) {}
+};
 
 /// One anisotropic Gaussian (decoded scales / opacity; SH rest in side array).
 struct GaussianSplatPoint final
@@ -63,7 +75,7 @@ class GaussianSplatCloud final : public NonsolidObject
         int shDegree;                ///< Max SH degree to evaluate (0..3).
         DBL opacityCutoff;           ///< Skip weights below this.
         DBL alphaStop;               ///< Stop compositing when accumulated alpha exceeds this.
-        int samples;                 ///< 1 = 3D peak; 2 = Kerbl Jacobian EWA; >=3 = Vol3DGS volume α.
+        int samples;                 ///< 1 = 3D peak; 2 = project/sort/blend (Kerbl); >=3 = Vol3DGS volume α.
         int maxHits;                 ///< Cap on collected splat hits (0 = adaptive soft cap).
         int bvhLeafSize;             ///< BVH leaf size (1 = quality).
         DBL giWeight;                ///< Scale for bounce/GI segment contribution (Trace hook).
@@ -71,6 +83,35 @@ class GaussianSplatCloud final : public NonsolidObject
 
         std::vector<GaussianSplatBVHNode> bvh;
         std::vector<int> bvhOrder; ///< Permutation of point indices used by BVH leaves.
+
+        /// One projected Gaussian in screen space (pixels from image centre).
+        struct ProjEntry final
+        {
+            DBL meanU, meanV;
+            DBL cov00, cov01, cov11;
+            DBL depth;   ///< View depth along camera forward.
+            DBL alpha;   ///< Sigmoid opacity (scaled).
+            DBL r, g, b; ///< View-dependent SH colour for this camera.
+        };
+
+        /// Frame cache: project all splats once, bin into screen tiles (CSR).
+        struct ProjCache final
+        {
+            bool valid;
+            Vector3d origin, right, up, forward;
+            DBL fx, fy;
+            int tileSize;
+            int tilesX, tilesY;
+            DBL tileOriginU, tileOriginV;
+            std::vector<ProjEntry> entries;
+            std::vector<int> tileOffsets; ///< tilesX*tilesY + 1
+            std::vector<int> tileIndices;
+            ProjCache() :
+                valid(false), fx(0), fy(0), tileSize(16),
+                tilesX(0), tilesY(0), tileOriginU(0), tileOriginV(0) {}
+        };
+        mutable ProjCache projCache;
+        mutable std::mutex projCacheMutex;
 
         GaussianSplatCloud();
         virtual ~GaussianSplatCloud() override;
@@ -91,18 +132,25 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Build BVH after points/restCoeffs are filled. Call before render.
         void BuildAcceleration();
 
-        /// Evaluate SH colour for view direction (world space, toward camera).
+        /// Evaluate SH colour. @p viewDir is camera→splat (SuperSplat / Inria convention).
         void EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const;
 
         /// Integrate SH emission + alpha along ray segment [t0,t1] in object/local space.
-        /// @param viewDir  Direction toward viewer (typically -dir).
+        /// @param viewDir  Direction toward viewer (typically -dir) — flipped to camera→splat for SH.
         /// @param Thread   Scratch for hit list (must be non-null).
         /// @param useKerbl When true and Thread has a valid primary-ray projection, samples==2
-        ///                 uses Kerbl Σ'=JWΣWᵀJᵀ; otherwise plane-perp billboard EWA.
+        ///                 uses Kerbl Σ'=JWΣWᵀJᵀ along-ray (legacy); prefer Projected path.
         bool IntegrateAlongRay(const Vector3d& origin, const Vector3d& dir,
                                DBL t0, DBL t1, const Vector3d& viewDir,
                                GaussianSplatSegmentResult& out, TraceThreadData *Thread,
                                bool useKerbl = false) const;
+
+        /// Build/reuse screen-space projection cache for this camera (thread-safe).
+        bool EnsureProjectedCache(const GaussianSplatCamBasis& cam) const;
+
+        /// SuperSplat-style pixel: tile lookup → depth sort → 2D EWA front-to-back blend.
+        bool CompositeProjectedPixel(DBL screenU, DBL screenV,
+                                     GaussianSplatSegmentResult& out, TraceThreadData *Thread) const;
 
     private:
         void BuildBVHRecursive(int nodeIndex, int begin, int end, int depth);
@@ -111,6 +159,7 @@ class GaussianSplatCloud final : public NonsolidObject
         bool SplatContribution(const GaussianSplatPoint& sp, const Vector3d& origin, const Vector3d& dir,
                                DBL tSeg0, DBL tSeg1, DBL& tHit, DBL& weight,
                                TraceThreadData *Thread, bool useKerbl) const;
+        void BuildProjectedCache(const GaussianSplatCamBasis& cam) const;
 };
 
 }
