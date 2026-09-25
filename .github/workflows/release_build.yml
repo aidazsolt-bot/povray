@@ -18,7 +18,7 @@ jobs:
     steps:
 
     - name: 'Check out Repository'
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
 
     - name: 'Extract Source Version Information'
       uses: POV-Ray/povray/.github/actions/get_source_version@gh-actions-v1
