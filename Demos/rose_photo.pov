@@ -1,4 +1,5 @@
-// Offline GaussianSplatCloud — samples 2 = SuperSplat project/sort/blend (CPU).
+// Veiled-baseline still: project/sort/blend + channel-major SH, soft falloff,
+// low opacity cutoff, volume path still allowed (pre anti-floater hardening).
 #version 3.8;
 global_settings { assumed_gamma 1.0 }
 
@@ -15,7 +16,7 @@ gaussian_splat {
   sh_degree 3
   samples 2
   alpha_stop 0.999
-  opacity_cutoff 0.05
+  opacity_cutoff 0.0039
 }
 
-// ../unix/povray +W1920 +H1080 -D -Oresults/rose_proj_hd.png rose_photo.pov
+// ../unix/povray +W1920 +H1080 -D -Oresults/rose_veiled_baseline.png rose_photo.pov

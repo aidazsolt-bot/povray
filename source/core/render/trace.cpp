@@ -2821,10 +2821,8 @@ void Trace::IntegrateGaussianSplatVolumes(const Ray& ray, const Intersection& be
         const bool useKerbl = ray.IsPrimaryRay() && threadData != nullptr &&
                               threadData->GaussianSplatCam.camValid &&
                               threadData->GaussianSplatCam.pixelValid;
-        // samples==2 primary: All_Intersections already did project/sort/blend.
-        // Volume IntegrateAlongRay would re-paint unculled floaters onto empty pixels.
-        if (cloud->samples == 2 && useKerbl)
-            continue;
+        // Veiled-baseline: keep volume IntegrateAlongRay even for samples==2
+        // (later branches skip this to avoid fog outside the subject).
         if (!cloud->IntegrateAlongRay(localRay.Origin, localRay.Direction, EPSILON, localT1,
                                        -localRay.Direction, seg, threadData, useKerbl))
             continue;

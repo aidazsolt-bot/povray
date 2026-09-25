@@ -3,8 +3,10 @@
 /// @file core/shape/gaussiansplat.cpp
 ///
 /// Experimental 3D Gaussian Splatting cloud: samples==2 uses SuperSplat-style
-/// project / tile / depth-sort / 2D EWA blend (CPU). samples<=1 peak and
-/// samples>=3 Vol3DGS remain along-ray (GI / hybrid).
+/// project / tile / depth-sort / 2D EWA blend (CPU). This branch restores the
+/// "veiled" baseline (channel-major SH + project path, before floater culls /
+/// normExp / volume-skip hardening). samples<=1 peak and samples>=3 Vol3DGS
+/// remain along-ray (GI / hybrid).
 ///
 //******************************************************************************
 
@@ -54,36 +56,22 @@ const DBL kWeightEps = 1.0e-4;
 const int kDefaultMaxHits = 65536;
 const int kHardMaxHits = 262144;
 const DBL kExtentSigma = 3.0;
-/// SuperSplat quad edge at UV=1 ⇒ mahalanobis² = 8 (2√2 σ); match their cull.
+/// SuperSplat quad edge at UV=1 ⇒ mahalanobis² = 8 (2√2 σ); soft cull only.
 const DBL kProjPowerCull = 8.0;
 const int kProjTileSize = 16;
-/// SuperSplat editor default: drop splats whose major axis is under 2 px.
-const DBL kProjMinPixelSize = 2.0;
-/// Drop absurd screen footprints (keeps side fog discs from dominating empty pixels).
-const DBL kProjMaxAxisPx = 128.0;
-/// Drop world-space scale outliers (Rose p95 ≈ 0.13).
-const DBL kProjMaxWorldScale = 0.12;
-/// Drop spatial outliers outside the dense core (percentile box + margin).
-const DBL kProjOutlierPercentile = 0.92;
-const DBL kProjOutlierMargin = 0.08;
-/// Minimum 3D neighbors within radius — isolated floaters make fog/glare.
-const int kProjMinNeighbors = 6;
-const DBL kProjNeighborRadius = 0.12;
+/// Veiled-baseline: no min/max pixel / floater culls (those came after the
+/// "verschleiert" feedback). Extent still used for tile coverage.
 const DBL kSqrtTwoPi = 2.5066282746310002; // √(2π)
-const DBL kExpNeg4 = 0.01831563888873418; // e^{-4}
-const DBL kInvOneMinusExpNeg4 = 1.0 / (1.0 - 0.01831563888873418);
 
 inline DBL Clamp01(DBL v)
 {
     return (v < 0.0) ? 0.0 : ((v > 1.0) ? 1.0 : v);
 }
 
-/// SuperSplat fragment falloff: remaps exp(-4 r²) so the quad edge is exactly 0.
-inline DBL NormExpPower(DBL power)
+/// Plain Gaussian falloff (pre-normExp / pre-size-cull veiled baseline).
+inline DBL GaussPower(DBL power)
 {
-    // power = mahalanobis²; at UV edge power=8 ⇒ exp(-0.5*8)=e^{-4}.
-    const DBL g = std::exp(-0.5 * power);
-    return Clamp01((g - kExpNeg4) * kInvOneMinusExpNeg4);
+    return std::exp(-0.5 * power);
 }
 
 /// Display encode for PNG/pigment: keep [0,1] linear, soft-knee HDR above 1.
@@ -840,67 +828,8 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
     if (points.empty() || cam.fx <= EPSILON || cam.fy <= EPSILON)
         return;
 
-    // Dense-core AABB from percentiles — kills fog/glare floaters outside the bouquet.
-    std::vector<DBL> xs, ys, zs;
-    xs.reserve(points.size());
-    ys.reserve(points.size());
-    zs.reserve(points.size());
-    for (size_t pi = 0; pi < points.size(); ++pi)
-    {
-        Vector3d pos = points[pi].position;
-        if (Trans != nullptr)
-            MTransPoint(pos, points[pi].position, Trans);
-        xs.push_back(pos[X]);
-        ys.push_back(pos[Y]);
-        zs.push_back(pos[Z]);
-    }
-    auto percentile = [](std::vector<DBL>& v, DBL p) -> DBL {
-        if (v.empty()) return 0.0;
-        std::sort(v.begin(), v.end());
-        const DBL idx = p * static_cast<DBL>(v.size() - 1);
-        const size_t i0 = static_cast<size_t>(idx);
-        const size_t i1 = std::min(i0 + 1, v.size() - 1);
-        const DBL t = idx - static_cast<DBL>(i0);
-        return v[i0] * (1.0 - t) + v[i1] * t;
-    };
-    const DBL plo = (1.0 - kProjOutlierPercentile) * 0.5;
-    const DBL phi = 1.0 - plo;
-    std::vector<DBL> x2 = xs, y2 = ys, z2 = zs;
-    DBL xLo = percentile(x2, plo), xHi = percentile(x2, phi);
-    DBL yLo = percentile(y2, plo), yHi = percentile(y2, phi);
-    DBL zLo = percentile(z2, plo), zHi = percentile(z2, phi);
-    const DBL xPad = (xHi - xLo) * kProjOutlierMargin + 1.0e-3;
-    const DBL yPad = (yHi - yLo) * kProjOutlierMargin + 1.0e-3;
-    const DBL zPad = (zHi - zLo) * kProjOutlierMargin + 1.0e-3;
-    xLo -= xPad; xHi += xPad;
-    yLo -= yPad; yHi += yPad;
-    zLo -= zPad; zHi += zPad;
-
-    // Neighbor density (view-independent): isolated Gaussians are fog floaters.
-    std::vector<int> nbr(points.size(), 0);
-    {
-        const DBL R2 = kProjNeighborRadius * kProjNeighborRadius;
-        std::vector<Vector3d> wpos(points.size());
-        for (size_t i = 0; i < points.size(); ++i)
-        {
-            wpos[i] = points[i].position;
-            if (Trans != nullptr)
-                MTransPoint(wpos[i], points[i].position, Trans);
-        }
-        for (size_t i = 0; i < points.size(); ++i)
-        {
-            for (size_t j = i + 1; j < points.size(); ++j)
-            {
-                const Vector3d d = wpos[i] - wpos[j];
-                if (dot(d, d) < R2)
-                {
-                    ++nbr[i];
-                    ++nbr[j];
-                }
-            }
-        }
-    }
-
+    // Veiled-baseline: project all opacity-passing Gaussians (no floater AABB /
+    // neighbor / scale / screen-size culls from the later anti-fog pass).
     projCache.entries.reserve(points.size());
 
     DBL minU = BOUND_HUGE, maxU = -BOUND_HUGE, minV = BOUND_HUGE, maxV = -BOUND_HUGE;
@@ -913,16 +842,10 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         const DBL opac = Clamp01(sp.opacity * opacityScale);
         if (opac < opacityCutoff)
             continue;
-        if (nbr[pi] < kProjMinNeighbors)
-            continue;
 
         Vector3d pos = sp.position;
         if (Trans != nullptr)
             MTransPoint(pos, sp.position, Trans);
-
-        if (pos[X] < xLo || pos[X] > xHi || pos[Y] < yLo || pos[Y] > yHi ||
-            pos[Z] < zLo || pos[Z] > zHi)
-            continue;
 
         const Vector3d rel = pos - cam.origin;
         const DBL tx = dot(rel, cam.right);
@@ -936,9 +859,6 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         const DBL sx = std::max(sp.scale[X], EPSILON);
         const DBL sy = std::max(sp.scale[Y], EPSILON);
         const DBL sz = std::max(sp.scale[Z], EPSILON);
-        // Oversized world Gaussians paint soft fog discs around the bouquet.
-        if (std::max(sx, std::max(sy, sz)) > kProjMaxWorldScale)
-            continue;
 
         // Σ_world = R S² Rᵀ
         DBL SigmaW[3][3];
@@ -995,10 +915,6 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         const DBL lambda2 = std::max(mid - rad, 0.1);
         const DBL len1 = 2.0 * std::sqrt(2.0 * lambda1);
         const DBL len2 = 2.0 * std::sqrt(2.0 * lambda2);
-        if (len1 < kProjMinPixelSize)
-            continue;
-        if (len1 > kProjMaxAxisPx)
-            continue;
         const DBL extent = len1 + len2;
 
         const DBL meanU = cam.fx * tx * invZ;
@@ -1122,7 +1038,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         const DBL power = (e.cov11 * du * du - 2.0 * e.cov01 * du * dv + e.cov00 * dv * dv) / det;
         if (power > kProjPowerCull)
             continue;
-        const DBL g = NormExpPower(power);
+        const DBL g = GaussPower(power);
         const DBL alpha = Clamp01(e.alpha * g);
         if (alpha < opacityCutoff)
             continue;
@@ -1194,9 +1110,9 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     const bool primaryProj = ray.IsPrimaryRay() && Thread != nullptr &&
                              Thread->GaussianSplatCam.camValid && Thread->GaussianSplatCam.pixelValid;
 
-    // samples == 2: SuperSplat project/sort/blend (CPU) for primary rays.
-    // Do NOT fall back to 3D BVH integration — that reintroduces large floaters
-    // the projected culls already dropped (fog/glare outside the subject).
+    // samples == 2: project/sort/blend when it hits; otherwise fall through to
+    // 3D BVH IntegrateAlongRay (veiled-baseline behaviour — volume can refill
+    // soft floaters outside the projected subject).
     if (samples == 2 && primaryProj)
     {
         GaussianSplatCamBasis cam;
@@ -1210,37 +1126,36 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         cam.screenV = Thread->GaussianSplatCam.screenV;
         cam.camValid = true;
         cam.pixelValid = true;
-        if (!EnsureProjectedCache(cam))
-            return false;
-        if (!CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread))
-            return false;
+        if (EnsureProjectedCache(cam) &&
+            CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread))
+        {
+            // View depth along camera forward → ray distance.
+            const Vector3d rayDir = Vector3d(ray.Direction).normalized();
+            const DBL cosFwd = dot(rayDir, cam.forward);
+            if (cosFwd < 1.0e-6)
+                return false;
+            const DBL rayT = seg.depth / cosFwd;
+            if (rayT < kDepthTolerance || rayT > MAX_DISTANCE)
+                return false;
+            Vector3d IPoint = ray.Evaluate(rayT);
+            if (!(Clip.empty() || Point_In_Clip(IPoint, Clip, Thread)))
+                return false;
 
-        // View depth along camera forward → ray distance.
-        const Vector3d rayDir = Vector3d(ray.Direction).normalized();
-        const DBL cosFwd = dot(rayDir, cam.forward);
-        if (cosFwd < 1.0e-6)
-            return false;
-        const DBL rayT = seg.depth / cosFwd;
-        if (rayT < kDepthTolerance || rayT > MAX_DISTANCE)
-            return false;
-        Vector3d IPoint = ray.Evaluate(rayT);
-        if (!(Clip.empty() || Point_In_Clip(IPoint, Clip, Thread)))
-            return false;
+            const DBL alphaOut = Clamp01(1.0 - seg.transmittance);
+            Vector3d rgb = seg.colour;
+            if (alphaOut > EPSILON)
+                rgb /= alphaOut;
+            rgb = TonemapSplatRgb(rgb);
 
-        const DBL alphaOut = Clamp01(1.0 - seg.transmittance);
-        Vector3d rgb = seg.colour;
-        if (alphaOut > EPSILON)
-            rgb /= alphaOut;
-        rgb = TonemapSplatRgb(rgb);
+            Thread->GaussianSplatColourValid = true;
+            Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
 
-        Thread->GaussianSplatColourValid = true;
-        Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
-
-        Vector3d n = -ray.Direction;
-        Intersection isect(rayT, IPoint, n, this);
-        isect.haveNormal = true;
-        Depth_Stack->push(isect);
-        return true;
+            Vector3d n = -ray.Direction;
+            Intersection isect(rayT, IPoint, n, this);
+            isect.haveNormal = true;
+            Depth_Stack->push(isect);
+            return true;
+        }
     }
 
     const bool useKerbl = primaryProj;
