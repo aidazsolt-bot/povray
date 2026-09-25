@@ -45,7 +45,10 @@
 #include <algorithm>
 
 // POV-Ray header files (base module)
-//  (none at the moment)
+#include "base/fileinputoutput.h"
+#include "base/pov_mem.h"
+#include "base/stringutilities.h"
+#include "base/textstream.h"
 
 // POV-Ray header files (core module)
 #include "core/material/interior.h"
@@ -63,6 +66,7 @@ namespace pov_parser
 using namespace pov;
 
 using std::max;
+using std::shared_ptr;
 using std::vector;
 
 static const int kMaxObjBufferSize = 1024;

@@ -58,6 +58,13 @@
     #define POV_PARSER_EXPERIMENTAL_OBJ_IMPORT 0
 #endif
 
+/// @def POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+/// Whether experimental PLY import (triangle meshes and 3D Gaussian splat PLYs) should be enabled.
+///
+#ifndef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+    #define POV_PARSER_EXPERIMENTAL_PLY_IMPORT 0
+#endif
+
 /// @def POV_PARSER_MAX_CACHED_MACRO_SIZE
 /// Default size limit for macros to be cached in memory.
 ///

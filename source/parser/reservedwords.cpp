@@ -412,6 +412,9 @@ const RESERVED_WORD Reserved_Words[] = {
     { PLANAR_TOKEN,                 "planar" },
     { PLANE_TOKEN,                  "plane" },
     { PNG_TOKEN,                    "png" },
+#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+    { PLY_TOKEN,                    "ply" },
+#endif
     { POINT_AT_TOKEN,               "point_at" },
     { POLARITY_TOKEN,               "polarity" },
     { POLY_TOKEN,                   "poly" },
