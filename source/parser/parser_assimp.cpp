@@ -53,6 +53,7 @@
 #include "core/scene/object.h"
 #include "core/scene/scenedata.h"
 #include "core/shape/csg.h"
+#include "core/shape/gaussiansplat.h"
 #include "core/shape/mesh.h"
 #include "core/shape/sphere.h"
 #include "core/support/imageutil.h"
@@ -482,8 +483,87 @@ void ReportAssimpBounds(Parser *parser, const aiScene *scene)
                     mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], cx, cy, cz, r);
 }
 
-ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL sphereScale, size_t maxCount)
+ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene, DBL sphereScale, size_t maxCount, int shDegree)
 {
+    GaussianSplatCloud *cloud = new GaussianSplatCloud();
+    cloud->shDegree = shDegree;
+    size_t remaining = (maxCount > 0) ? maxCount : static_cast<size_t>(-1);
+
+    for (unsigned mi = 0; mi < scene->mNumMeshes && remaining > 0; ++mi)
+    {
+        const aiMesh *mesh = scene->mMeshes[mi];
+        const aiGaussianSplat *gs = aiGetGaussianSplat(scene, mi);
+        if (mesh == nullptr || gs == nullptr || gs->mDC == nullptr || gs->mScale == nullptr || gs->mOpacity == nullptr)
+            continue;
+
+        if (cloud->restCount == 0 && gs->mNumRestCoeffs > 0)
+            cloud->restCount = gs->mNumRestCoeffs;
+
+        const unsigned n = min(mesh->mNumVertices, gs->mNumPoints);
+        for (unsigned vi = 0; vi < n && remaining > 0; ++vi)
+        {
+            const aiVector3D &pos = mesh->mVertices[vi];
+            const aiVector3D &dc = gs->mDC[vi];
+            DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
+            if (opacity < 0.01)
+                continue;
+
+            const aiVector3D &scl = gs->mScale[vi];
+            DBL sx = std::exp(static_cast<DBL>(scl.x)) * sphereScale;
+            DBL sy = std::exp(static_cast<DBL>(scl.y)) * sphereScale;
+            DBL sz = std::exp(static_cast<DBL>(scl.z)) * sphereScale;
+            sx = max(sx, EPSILON);
+            sy = max(sy, EPSILON);
+            sz = max(sz, EPSILON);
+
+            DBL qw = 1.0, qx = 0.0, qy = 0.0, qz = 0.0;
+            if (gs->mRotation != nullptr)
+            {
+                const aiColor4D &q = gs->mRotation[vi];
+                qw = q.r; qx = q.g; qy = q.b; qz = q.a;
+            }
+
+            GaussianSplatPoint sp;
+            sp.position = Vector3d(pos.x, pos.y, pos.z);
+            sp.scale = Vector3d(sx, sy, sz);
+            sp.qw = qw; sp.qx = qx; sp.qy = qy; sp.qz = qz;
+            sp.opacity = opacity;
+            sp.dc = Vector3d(dc.x, dc.y, dc.z);
+            sp.restOffset = static_cast<unsigned>(cloud->restCoeffs.size());
+
+            if (cloud->restCount > 0 && gs->mRest != nullptr)
+            {
+                for (unsigned k = 0; k < cloud->restCount; ++k)
+                    cloud->restCoeffs.push_back(static_cast<DBL>(gs->mRest[vi * gs->mNumRestCoeffs + k]));
+            }
+            else
+            {
+                sp.restOffset = 0;
+            }
+
+            cloud->points.push_back(sp);
+            --remaining;
+        }
+    }
+
+    if (cloud->points.empty())
+    {
+        delete cloud;
+        parser->Error("Assimp Gaussian splat import produced no usable points.");
+    }
+
+    cloud->BuildAcceleration();
+    cloud->Compute_BBox();
+    parser->Warning("Imported %lu Gaussian splat(s) via Assimp as GaussianSplatCloud (SH degree <= %d, rest=%u).",
+                    static_cast<unsigned long>(cloud->points.size()), cloud->shDegree, cloud->restCount);
+    return reinterpret_cast<ObjectPtr>(cloud);
+}
+
+ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL sphereScale, size_t maxCount, bool approximate, int shDegree)
+{
+    if (!approximate)
+        return BuildGaussianSplatCloudFromAssimp(parser, scene, sphereScale, maxCount, shDegree);
+
     CSG *root = new CSGMerge();
     size_t created = 0;
     size_t remaining = (maxCount > 0) ? maxCount : static_cast<size_t>(-1);
@@ -503,7 +583,6 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
             DBL r = 0.5 + kShC0 * dc.x;
             DBL g = 0.5 + kShC0 * dc.y;
             DBL b = 0.5 + kShC0 * dc.z;
-            // Assimp stores opacity logits (see gaussian.h); convert like native PLY importer.
             DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
             if (opacity < 0.01)
                 continue;
@@ -559,7 +638,7 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
     }
 
     root->Compute_BBox();
-    parser->Warning("Imported %lu Gaussian splat(s) via Assimp as CSG merge of ellipsoidal spheres (experimental).",
+    parser->Warning("Imported %lu Gaussian splat(s) via Assimp as CSG merge of ellipsoidal spheres (approximate).",
                     static_cast<unsigned long>(created));
     return reinterpret_cast<ObjectPtr>(root);
 }
@@ -772,7 +851,8 @@ const aiScene *ImportAssimpScene(Parser *parser, Assimp::Importer &importer, con
     return scene;
 }
 
-ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphereScale, size_t maxCount, bool meshOnly)
+ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphereScale, size_t maxCount,
+                            bool meshOnly, bool approximate, int shDegree)
 {
     Assimp::Importer importer;
     const aiScene *scene = ImportAssimpScene(parser, importer, sysPath);
@@ -820,7 +900,7 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
     ObjectPtr meshObj = nullptr;
 
     if (hasSplat)
-        splatObj = BuildGaussianSplatFromAssimp(parser, scene, sphereScale, maxCount);
+        splatObj = BuildGaussianSplatFromAssimp(parser, scene, sphereScale, maxCount, approximate, shDegree);
 
     if (hasTris)
     {
@@ -852,6 +932,28 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
 
 } // namespace
 
+void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree)
+{
+    EXPECT
+        CASE (MAX_COUNT_TOKEN)
+            maxCount = static_cast<size_t>(std::max(0.0, Parse_Float()));
+        END_CASE
+        CASE (SH_DEGREE_TOKEN)
+            shDegree = static_cast<int>(Parse_Float());
+            if (shDegree < 0) shDegree = 0;
+            if (shDegree > 3) shDegree = 3;
+        END_CASE
+        CASE (APPROXIMATE_TOKEN)
+            approximate = true;
+        END_CASE
+        OTHERWISE
+            UNGET
+            EXIT
+        END_CASE
+    END_EXPECT
+    (void)sphereScale;
+}
+
 ObjectPtr Parser::Parse_Assimp()
 {
     Parse_Begin();
@@ -865,9 +967,36 @@ ObjectPtr Parser::Parse_Assimp()
     UCS2 *fileName = Parse_String(true);
     DBL sphereScale = 1.0;
     size_t maxCount = 0;
+    bool approximate = false;
+    int shDegree = 3;
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
-    ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false);
+    ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
+    POV_FREE(fileName);
+    result = Parse_Object_Mods(result);
+    return result;
+}
+
+ObjectPtr Parser::Parse_Gaussian_Splat()
+{
+    Parse_Begin();
+
+    ObjectPtr existing = Parse_Object_Id();
+    if (existing != nullptr)
+        return existing;
+
+    mExperimentalFlags.assimpImport = true;
+
+    UCS2 *fileName = Parse_String(true);
+    DBL sphereScale = 1.0;
+    size_t maxCount = 0;
+    bool approximate = false;
+    int shDegree = 3;
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
+
+    std::string sysPath = ResolveAssimpPath(this, fileName);
+    ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
     result = Parse_Object_Mods(result);
     return result;

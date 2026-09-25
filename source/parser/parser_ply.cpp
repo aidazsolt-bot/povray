@@ -47,6 +47,7 @@
 // C++ variants of C standard header files
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 // C++ standard header files
@@ -68,6 +69,7 @@
 #include "core/material/texture.h"
 #include "core/math/matrix.h"
 #include "core/shape/csg.h"
+#include "core/shape/gaussiansplat.h"
 #include "core/shape/mesh.h"
 #include "core/shape/sphere.h"
 
@@ -445,7 +447,8 @@ static TEXTURE *MakeSplatTexture(DBL r, DBL g, DBL b, DBL opacity)
 }
 
 static ObjectPtr BuildGaussianSplatObject(Parser* parser, shared_ptr<IStream>& stream, const PlyHeader& header,
-                                         const PlyElement& vertexEl, DBL sphereScale, size_t maxCount)
+                                         const PlyElement& vertexEl, DBL sphereScale, size_t maxCount,
+                                         bool approximate, int shDegree)
 {
     std::map<std::string, size_t> propIndex;
     for (size_t i = 0; i < vertexEl.properties.size(); ++i)
@@ -464,14 +467,35 @@ static ObjectPtr BuildGaussianSplatObject(Parser* parser, shared_ptr<IStream>& s
     size_t is0 = require("scale_0"), is1 = require("scale_1"), is2 = require("scale_2");
     size_t ir0 = require("rot_0"), ir1 = require("rot_1"), ir2 = require("rot_2"), ir3 = require("rot_3");
 
+    unsigned restCount = 0;
+    std::vector<size_t> restIdx;
+    for (;;)
+    {
+        char name[32];
+        std::snprintf(name, sizeof(name), "f_rest_%u", restCount);
+        auto it = propIndex.find(name);
+        if (it == propIndex.end())
+            break;
+        restIdx.push_back(it->second);
+        ++restCount;
+    }
+
     size_t count = vertexEl.count;
     if (maxCount > 0 && maxCount < count)
         count = maxCount;
 
-    CSG *root = new CSGMerge();
-    size_t created = 0;
+    GaussianSplatCloud *cloud = nullptr;
+    CSG *root = nullptr;
+    if (approximate)
+        root = new CSGMerge();
+    else
+    {
+        cloud = new GaussianSplatCloud();
+        cloud->shDegree = shDegree;
+        cloud->restCount = restCount;
+    }
 
-    // ASCII: buffer leftover lines; Binary: read sequentially
+    size_t created = 0;
     std::string asciiLine;
     std::vector<std::string> asciiWords;
     size_t asciiWi = 0;
@@ -528,12 +552,9 @@ static ObjectPtr BuildGaussianSplatObject(Parser* parser, shared_ptr<IStream>& s
         }
 
         if (vi >= count)
-            continue; // still consume remaining records when maxCount truncates
+            continue;
 
         Vector3d center(scalars[ix], scalars[iy], scalars[iz]);
-        DBL r = 0.5 + kShC0 * scalars[idc0];
-        DBL g = 0.5 + kShC0 * scalars[idc1];
-        DBL b = 0.5 + kShC0 * scalars[idc2];
         DBL opacity = Sigmoid(scalars[iop]);
         if (opacity < 0.01)
             continue;
@@ -541,45 +562,68 @@ static ObjectPtr BuildGaussianSplatObject(Parser* parser, shared_ptr<IStream>& s
         DBL sx = std::exp(scalars[is0]) * sphereScale;
         DBL sy = std::exp(scalars[is1]) * sphereScale;
         DBL sz = std::exp(scalars[is2]) * sphereScale;
-        // Avoid degenerate scales
         sx = max(sx, EPSILON);
         sy = max(sy, EPSILON);
         sz = max(sz, EPSILON);
 
         DBL qw = scalars[ir0], qx = scalars[ir1], qy = scalars[ir2], qz = scalars[ir3];
 
-        Sphere *sph = new Sphere();
-        sph->Center = Vector3d(0.0, 0.0, 0.0);
-        sph->Radius = 1.0;
-        sph->Texture = MakeSplatTexture(r, g, b, opacity);
-        sph->Type |= TEXTURED_OBJECT;
+        if (approximate)
+        {
+            DBL r = 0.5 + kShC0 * scalars[idc0];
+            DBL g = 0.5 + kShC0 * scalars[idc1];
+            DBL b = 0.5 + kShC0 * scalars[idc2];
+            Sphere *sph = new Sphere();
+            sph->Center = Vector3d(0.0, 0.0, 0.0);
+            sph->Radius = 1.0;
+            sph->Texture = MakeSplatTexture(r, g, b, opacity);
+            sph->Type |= TEXTURED_OBJECT;
 
-        TRANSFORM scaleT, rotT, transT;
-        Compute_Scaling_Transform(&scaleT, Vector3d(sx, sy, sz));
-
-        MATRIX rotM;
-        QuaternionToMatrix(qw, qx, qy, qz, rotM);
-        Compute_Matrix_Transform(&rotT, rotM);
-        Compose_Transforms(&scaleT, &rotT);
-
-        Compute_Translation_Transform(&transT, center);
-        Compose_Transforms(&scaleT, &transT);
-
-        Transform_Object(reinterpret_cast<ObjectPtr>(sph), &scaleT);
-        sph->Compute_BBox();
-
-        sph->Type |= IS_CHILD_OBJECT;
-        root->children.push_back(reinterpret_cast<ObjectPtr>(sph));
+            TRANSFORM scaleT, rotT, transT;
+            Compute_Scaling_Transform(&scaleT, Vector3d(sx, sy, sz));
+            MATRIX rotM;
+            QuaternionToMatrix(qw, qx, qy, qz, rotM);
+            Compute_Matrix_Transform(&rotT, rotM);
+            Compose_Transforms(&scaleT, &rotT);
+            Compute_Translation_Transform(&transT, center);
+            Compose_Transforms(&scaleT, &transT);
+            Transform_Object(reinterpret_cast<ObjectPtr>(sph), &scaleT);
+            sph->Compute_BBox();
+            sph->Type |= IS_CHILD_OBJECT;
+            root->children.push_back(reinterpret_cast<ObjectPtr>(sph));
+        }
+        else
+        {
+            GaussianSplatPoint sp;
+            sp.position = center;
+            sp.scale = Vector3d(sx, sy, sz);
+            sp.qw = qw; sp.qx = qx; sp.qy = qy; sp.qz = qz;
+            sp.opacity = opacity;
+            sp.dc = Vector3d(scalars[idc0], scalars[idc1], scalars[idc2]);
+            sp.restOffset = static_cast<unsigned>(cloud->restCoeffs.size());
+            for (unsigned k = 0; k < restCount; ++k)
+                cloud->restCoeffs.push_back(scalars[restIdx[k]]);
+            cloud->points.push_back(sp);
+        }
         ++created;
     }
 
     if (created == 0)
         parser->Error("No usable Gaussian splats found in PLY file.");
 
-    root->Compute_BBox();
-    parser->Warning("Imported %lu Gaussian splat(s) from PLY as CSG merge of ellipsoidal spheres (experimental).",
-                    static_cast<unsigned long>(created));
-    return reinterpret_cast<ObjectPtr>(root);
+    if (approximate)
+    {
+        root->Compute_BBox();
+        parser->Warning("Imported %lu Gaussian splat(s) as CSG ellipsoidal spheres (approximate).",
+                        static_cast<unsigned long>(created));
+        return reinterpret_cast<ObjectPtr>(root);
+    }
+
+    cloud->BuildAcceleration();
+    cloud->Compute_BBox();
+    parser->Warning("Imported %lu Gaussian splat(s) as GaussianSplatCloud (SH degree <= %d, rest=%u).",
+                    static_cast<unsigned long>(cloud->points.size()), cloud->shDegree, cloud->restCount);
+    return reinterpret_cast<ObjectPtr>(cloud);
 }
 
 static void BuildMeshFromPly(Parser* parser, Mesh* mesh, shared_ptr<IStream>& stream, const PlyHeader& header,
@@ -866,6 +910,29 @@ ObjectPtr Parser::Parse_Ply()
     UCS2 *fileName = Parse_String(true);
     DBL sphereScale = 1.0;
     size_t maxCount = 0;
+    bool approximate = false;
+    int shDegree = 3;
+#if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
+#else
+    EXPECT
+        CASE (MAX_COUNT_TOKEN)
+            maxCount = static_cast<size_t>(std::max(0.0, Parse_Float()));
+        END_CASE
+        CASE (SH_DEGREE_TOKEN)
+            shDegree = static_cast<int>(Parse_Float());
+            if (shDegree < 0) shDegree = 0;
+            if (shDegree > 3) shDegree = 3;
+        END_CASE
+        CASE (APPROXIMATE_TOKEN)
+            approximate = true;
+        END_CASE
+        OTHERWISE
+            UNGET
+            EXIT
+        END_CASE
+    END_EXPECT
+#endif
 
     shared_ptr<IStream> stream = OpenPlyFile(this, fileName);
     PlyHeader header = ReadPlyHeader(stream, this);
@@ -886,7 +953,7 @@ ObjectPtr Parser::Parse_Ply()
 
     if (IsGaussianSplatElement(*vertexEl))
     {
-        result = BuildGaussianSplatObject(this, stream, header, *vertexEl, sphereScale, maxCount);
+        result = BuildGaussianSplatObject(this, stream, header, *vertexEl, sphereScale, maxCount, approximate, shDegree);
     }
     else
     {

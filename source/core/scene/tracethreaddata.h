@@ -136,6 +136,12 @@ class TraceThreadData : public ThreadData
 
         CrackleCache* mpCrackleCache;
 
+        /// Thread-local emission colour for GaussianSplatCloud hits (set in All_Intersections).
+        TransColour GaussianSplatColour;
+        bool GaussianSplatColourValid;
+        /// Owned emission texture reused by GaussianSplatCloud::Determine_Textures.
+        TEXTURE *GaussianSplatTexture;
+
         // data for waves and ripples pattern
         unsigned int numberOfWaves;
         std::vector<double> waveFrequencies;

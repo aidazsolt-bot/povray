@@ -353,6 +353,7 @@ void Parser::Run()
     if(mExperimentalFlags.objImport)            featureList.push_back("wavefront obj import");
     if(mExperimentalFlags.plyImport)            featureList.push_back("ply import");
     if(mExperimentalFlags.assimpImport)         featureList.push_back("assimp import");
+    if(mExperimentalFlags.assimpImport)         featureList.push_back("gaussian_splat");
     if(mExperimentalFlags.slopeAltitude)        featureList.push_back("slope pattern altitude");
     if(mExperimentalFlags.spline)               featureList.push_back("spline");
     if(mExperimentalFlags.subsurface)           featureList.push_back("subsurface light transport");
@@ -6408,6 +6409,9 @@ ObjectPtr Parser::Parse_Object ()
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
         CASE (ASSIMP_TOKEN)
             Object = Parse_Assimp();
+        END_CASE
+        CASE (GAUSSIAN_SPLAT_TOKEN)
+            Object = Parse_Gaussian_Splat();
         END_CASE
 #endif
 

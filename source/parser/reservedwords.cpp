@@ -95,6 +95,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { APERTURE_TOKEN,               "aperture" },
     { APPEND_TOKEN,                 "append" },
     { ARC_ANGLE_TOKEN,              "arc_angle" },
+    { APPROXIMATE_TOKEN,            "approximate" },
     { AREA_ILLUMINATION_TOKEN,      "area_illumination" },
     { AREA_LIGHT_TOKEN,             "area_light" },
     { ARRAY_TOKEN,                  "array" },
@@ -257,6 +258,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { FUNCTION_TOKEN,               "function" },
 
     { GAMMA_TOKEN,                  "gamma" },
+    { GAUSSIAN_SPLAT_TOKEN,         "gaussian_splat" },
     { GATHER_TOKEN,                 "gather" },
     { GIF_TOKEN,                    "gif" },
     { GLOBAL_TOKEN,                 "global" },
@@ -331,6 +333,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { MATERIAL_MAP_TOKEN,           "material_map" },
     { MATRIX_TOKEN,                 "matrix" },
     { MAX_TOKEN,                    "max" },
+    { MAX_COUNT_TOKEN,              "max_count" },
     { MAX_EXTENT_TOKEN,             "max_extent" },
     { MAX_GRADIENT_TOKEN,           "max_gradient" },
     { MAX_INTERSECTIONS_TOKEN,      "max_intersections" },
@@ -487,6 +490,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { SGREEN_TOKEN,                 "sgreen" },
 #endif
     { SHADOWLESS_TOKEN,             "shadowless" },
+    { SH_DEGREE_TOKEN,              "sh_degree" },
     { SINE_WAVE_TOKEN,              "sine_wave" },
     { SIN_TOKEN,                    "sin" },
     { SINH_TOKEN,                   "sinh" },

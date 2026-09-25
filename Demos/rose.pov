@@ -1,4 +1,6 @@
 // PLY Gaussian-splat import demo — Rose.ply
+// Uses GaussianSplatCloud (soft BVH + SH alpha composite). For emission-only
+// photoreal-style lighting see rose_photo.pov / rose_training_camera.pov.
 // Camera framed from Assimp AABB of the same model.
 #version 3.8;
 global_settings { assumed_gamma 1.0 }

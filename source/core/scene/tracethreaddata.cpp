@@ -47,6 +47,7 @@
 
 // POV-Ray header files (core module)
 #include "core/material/noise.h"
+#include "core/material/texture.h"
 #include "core/scene/scenedata.h"
 #include "core/shape/blob.h"
 #include "core/shape/fractal.h"
@@ -88,6 +89,9 @@ TraceThreadData::TraceThreadData(std::shared_ptr<SceneData> sd, size_t seed) :
 
     stochasticRandomGenerator->Seed(stochasticRandomSeedBase);
 
+    GaussianSplatColourValid = false;
+    GaussianSplatTexture = nullptr;
+
     for(std::vector<LightSource *>::iterator it = sceneData->lightSources.begin(); it != sceneData->lightSources.end(); it++)
         lightSources.push_back(static_cast<LightSource *> (Copy_Object(*it)));
 
@@ -124,6 +128,8 @@ TraceThreadData::~TraceThreadData()
     delete[] Blob_Intervals;
     for(std::vector<LightSource *>::iterator it = lightSources.begin(); it != lightSources.end(); it++)
         Destroy_Object(*it);
+    Destroy_Textures(GaussianSplatTexture);
+    GaussianSplatTexture = nullptr;
     delete mpCrackleCache;
     delete mpRenderStats;
 }
