@@ -80,6 +80,9 @@ class GaussianSplatCloud final : public NonsolidObject
         int bvhLeafSize;             ///< BVH leaf size (1 = quality).
         DBL giWeight;                ///< Scale for bounce/GI segment contribution (Trace hook).
         DBL opacityScale;            ///< Multiplier on splat opacity (offline density control).
+        /// When true (or auto-detected from scene texture/interior): splat RGB feeds
+        /// pigment + POV finish/IOR instead of pure emission billboards.
+        bool materialShading;
 
         std::vector<GaussianSplatBVHNode> bvh;
         std::vector<int> bvhOrder; ///< Permutation of point indices used by BVH leaves.
@@ -128,6 +131,9 @@ class GaussianSplatCloud final : public NonsolidObject
         virtual void Compute_BBox() override;
         virtual void Determine_Textures(Intersection *, bool, WeightedTextureVector&, TraceThreadData *) override;
         virtual bool IsOpaque() const override;
+
+        /// True if scene texture finish or interior IOR should drive shading.
+        bool WantsMaterialShading() const;
 
         /// Build BVH after points/restCoeffs are filled. Call before render.
         void BuildAcceleration();

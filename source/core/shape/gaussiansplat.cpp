@@ -150,7 +150,8 @@ GaussianSplatCloud::GaussianSplatCloud() :
     maxHits(0),
     bvhLeafSize(1),
     giWeight(1.0),
-    opacityScale(1.0)
+    opacityScale(1.0),
+    materialShading(false)
 {
     Type |= PATCH_OBJECT | TEXTURED_OBJECT;
     Set_Flag(this, HOLLOW_FLAG);
@@ -178,6 +179,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->bvhLeafSize = bvhLeafSize;
     New->giWeight = giWeight;
     New->opacityScale = opacityScale;
+    New->materialShading = materialShading;
     New->bvh = bvh;
     New->bvhOrder = bvhOrder;
     New->Trans = Copy_Transform(Trans);
@@ -192,6 +194,22 @@ ObjectPtr GaussianSplatCloud::Copy()
 
 bool GaussianSplatCloud::IsOpaque() const
 {
+    return false;
+}
+
+bool GaussianSplatCloud::WantsMaterialShading() const
+{
+    if (materialShading)
+        return true;
+    if (interior != nullptr && interior->IOR > SNGL(1.0) + EPSILON)
+        return true;
+    if (Texture != nullptr && Texture->Finish != nullptr)
+    {
+        const FINISH *f = Texture->Finish;
+        if (f->Diffuse > EPSILON || f->DiffuseBack > EPSILON ||
+            f->Specular > EPSILON || f->Phong > EPSILON)
+            return true;
+    }
     return false;
 }
 
@@ -1192,6 +1210,60 @@ void GaussianSplatCloud::Determine_Textures(Intersection *, bool, WeightedTextur
     TEXTURE *tex = EnsureThreadSplatTexture(Thread);
     if (Thread->GaussianSplatColourValid && tex->Pigment != nullptr)
         tex->Pigment->colour = Thread->GaussianSplatColour;
+
+    // Default: pure SH emission. Material path: splat RGB as pigment + scene finish/IOR.
+    if (tex->Finish != nullptr)
+    {
+        if (WantsMaterialShading())
+        {
+            if (Texture != nullptr && Texture->Finish != nullptr)
+            {
+                const FINISH *src = Texture->Finish;
+                tex->Finish->Diffuse = src->Diffuse;
+                tex->Finish->DiffuseBack = src->DiffuseBack;
+                tex->Finish->Brilliance = src->Brilliance;
+                tex->Finish->Specular = src->Specular;
+                tex->Finish->Roughness = src->Roughness;
+                tex->Finish->Phong = src->Phong;
+                tex->Finish->Phong_Size = src->Phong_Size;
+                tex->Finish->Ambient = src->Ambient;
+                tex->Finish->Emission = src->Emission;
+                tex->Finish->Reflection_Max = src->Reflection_Max;
+                tex->Finish->Reflection_Min = src->Reflection_Min;
+                tex->Finish->Reflection_Falloff = src->Reflection_Falloff;
+                tex->Finish->Reflection_Fresnel = src->Reflection_Fresnel;
+                tex->Finish->Fresnel = src->Fresnel;
+                tex->Finish->Metallic = src->Metallic;
+                tex->Finish->Conserve_Energy = src->Conserve_Energy;
+            }
+            else
+            {
+                tex->Finish->Diffuse = 0.85f;
+                tex->Finish->DiffuseBack = 0.0f;
+                tex->Finish->Ambient = MathColour(0.08);
+                tex->Finish->Specular = 0.15f;
+                tex->Finish->Roughness = 0.05f;
+                tex->Finish->Phong = 0.0f;
+                tex->Finish->Emission = MathColour(0.15);
+                tex->Finish->Reflection_Max = MathColour(0.0);
+                tex->Finish->Reflection_Min = MathColour(0.0);
+            }
+            if (tex->Finish->Emission.IsNearZero(EPSILON))
+                tex->Finish->Emission = MathColour(0.15);
+        }
+        else
+        {
+            tex->Finish->Ambient = MathColour(0.0);
+            tex->Finish->Diffuse = 0.0f;
+            tex->Finish->DiffuseBack = 0.0f;
+            tex->Finish->Specular = 0.0f;
+            tex->Finish->Phong = 0.0f;
+            tex->Finish->Emission = MathColour(1.0);
+            tex->Finish->Reflection_Max = MathColour(0.0);
+            tex->Finish->Reflection_Min = MathColour(0.0);
+        }
+    }
+
     textures.push_back(WeightedTexture(1.0, tex));
 }
 
