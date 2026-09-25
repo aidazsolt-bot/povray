@@ -5,7 +5,7 @@ inputs:
   configure-options:
     description: 'Additional option for `configure` script'
     required: false
-    default: ''
+    default: '-DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1'
   c-compiler:
     description: 'C Compiler to invoke'
     required: false
