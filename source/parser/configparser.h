@@ -65,6 +65,13 @@
     #define POV_PARSER_EXPERIMENTAL_PLY_IMPORT 0
 #endif
 
+/// @def POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+/// Whether experimental Assimp-based model import (meshes, materials, Gaussian splats via Arris API) should be enabled.
+///
+#ifndef POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+    #define POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT 0
+#endif
+
 /// @def POV_PARSER_MAX_CACHED_MACRO_SIZE
 /// Default size limit for macros to be cached in memory.
 ///

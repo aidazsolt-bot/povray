@@ -46,13 +46,24 @@
 
 // POV-Ray header files (base module)
 #include "base/fileinputoutput.h"
+#include "base/fileutil.h"
+#include "base/image/image.h"
+#include "base/path.h"
 #include "base/pov_mem.h"
 #include "base/stringutilities.h"
 #include "base/textstream.h"
 
 // POV-Ray header files (core module)
+#include "core/colour/spectral.h"
 #include "core/material/interior.h"
+#include "core/material/normal.h"
+#include "core/material/pattern.h"
+#include "core/material/pigment.h"
+#include "core/material/texture.h"
+#include "core/scene/object.h"
+#include "core/scene/scenedata.h"
 #include "core/shape/mesh.h"
+#include "core/support/imageutil.h"
 
 // POV-Ray header files (parser module)
 //  (none at the moment)
@@ -66,6 +77,7 @@ namespace pov_parser
 using namespace pov;
 
 using std::max;
+using std::min;
 using std::shared_ptr;
 using std::vector;
 
@@ -92,6 +104,371 @@ struct MaterialData final
     std::string mtlName;
     TEXTURE *texture;
 };
+
+static bool ReadWord (char *buffer, pov_base::ITextStream *file);
+static void AdvanceLine (pov_base::ITextStream *file);
+static bool HasMoreWords (pov_base::ITextStream *file);
+inline static bool ReadFloat (DBL& result, char *buffer, pov_base::ITextStream *file);
+
+static size_t FindMaterialIndex(const vector<MaterialData>& materialList, const std::string& name)
+{
+    for (size_t i = 0; i < materialList.size(); ++i)
+    {
+        if (materialList[i].mtlName == name)
+            return i + 1; // 1-based, 0 = none
+    }
+    return 0;
+}
+
+static bool LooksLikeNumberToken(const char *s)
+{
+    if (s == nullptr || s[0] == '\0')
+        return false;
+    if (s[0] == '-' || s[0] == '+')
+        return (s[1] != '\0' && (isdigit(static_cast<unsigned char>(s[1])) || s[1] == '.'));
+    return (isdigit(static_cast<unsigned char>(s[0])) || s[0] == '.');
+}
+
+/// Read a map_* / bump filename, skipping Wavefront option tokens (-bm, -s, …).
+static bool ReadMtlMapFilename(char *word, pov_base::ITextStream *file, std::string &outName)
+{
+    bool afterOption = false;
+    while (HasMoreWords(file) && ReadWord(word, file))
+    {
+        if (word[0] == '-')
+        {
+            afterOption = true;
+            continue;
+        }
+        if (afterOption && LooksLikeNumberToken(word))
+            continue;
+        afterOption = false;
+        outName = word;
+        return true;
+    }
+    return false;
+}
+
+static int FiletypeFromPathObj(const std::string &path)
+{
+    std::string use = path;
+#if defined(_POSIX_VERSION) || defined(__unix__) || defined(__APPLE__)
+    char realBuf[4096];
+    if (realpath(path.c_str(), realBuf) != nullptr)
+        use = realBuf;
+#endif
+    UCS2String ext = GetFileExtension(Path(SysToUCS2String(use.c_str())));
+    if (ext.empty())
+        return PNG_FILE;
+    const int mask = gFile_Type_To_Mask[InferFileTypeFromExt(ext)];
+    return (mask != NO_FILE) ? mask : PNG_FILE;
+}
+
+static std::string ResolveMtlMapPath(Parser *parser, const UCS2String &mtlFoundPath, const std::string &mapName)
+{
+    Path besideMtl(mtlFoundPath);
+    besideMtl.SetFile(SysToUCS2String(mapName.c_str()));
+
+    UCS2String found;
+    shared_ptr<IStream> stream = parser->Locate_File(besideMtl(), POV_File_Image_PNG, found, false);
+    if (stream == nullptr)
+        stream = parser->Locate_File(besideMtl(), POV_File_Image_JPEG, found, false);
+    if (stream == nullptr)
+        stream = parser->Locate_File(besideMtl(), POV_File_Text_User, found, false);
+    if (stream != nullptr && !found.empty())
+        return UCS2toSysString(found);
+
+    return UCS2toSysString(besideMtl());
+}
+
+static ImageData *LoadMtlImage(Parser *parser, const std::string &imagePath, bool gammaCorrect)
+{
+    ImageData *image = Create_Image();
+    ImageReadOptions options;
+    options.gammacorrect = gammaCorrect;
+    if (gammaCorrect && parser->sceneData->workingGamma)
+        options.workingGamma = SimpleGammaCurvePtr(parser->sceneData->workingGamma);
+
+    const int filetype = FiletypeFromPathObj(imagePath);
+    try
+    {
+        image->data = parser->Read_Image(filetype, SysToUCS2String(imagePath.c_str()).c_str(), options);
+    }
+    catch (...)
+    {
+        Destroy_Image(image);
+        throw;
+    }
+    if (image->data == nullptr)
+    {
+        Destroy_Image(image);
+        parser->Warning("Cannot read MTL texture image '%s'.", imagePath.c_str());
+        return nullptr;
+    }
+    image->Use = USE_COLOUR;
+    image->Map_Type = PLANAR_MAP;
+    image->iwidth = image->data->GetWidth();
+    image->iheight = image->data->GetHeight();
+    image->width = static_cast<SNGL>(image->iwidth);
+    image->height = static_cast<SNGL>(image->iheight);
+    return image;
+}
+
+static TEXTURE *MakeColourTexture(DBL r, DBL g, DBL b, DBL ambient)
+{
+    TEXTURE *tex = Create_Texture();
+    Destroy_Pigment(tex->Pigment);
+    tex->Pigment = Create_Pigment();
+    if (tex->Finish == nullptr)
+        tex->Finish = Create_Finish();
+
+    MathColour mc = ToMathColour(RGBColour(r, g, b));
+    tex->Pigment->colour = TransColour(mc, 0.0, 0.0);
+    tex->Finish->Ambient = MathColour(ambient);
+    Post_Textures(tex);
+    return tex;
+}
+
+static TEXTURE *MakeMtlMappedTexture(Parser *parser,
+                                     DBL kdR, DBL kdG, DBL kdB, DBL ambient,
+                                     DBL ksR, DBL ksG, DBL ksB, DBL shininessNs,
+                                     const std::string &mapKd, const std::string &mapBump,
+                                     const std::string &mapKs, const std::string &mapNorm,
+                                     bool &usedUvMaps)
+{
+    TEXTURE *tex = Create_Texture();
+    Destroy_Pigment(tex->Pigment);
+    tex->Pigment = Create_Pigment();
+    if (tex->Finish == nullptr)
+        tex->Finish = Create_Finish();
+
+    if (!mapKd.empty())
+    {
+        ImageData *image = LoadMtlImage(parser, mapKd, true);
+        if (image != nullptr)
+        {
+            tex->Pigment->Type = IMAGE_MAP_PATTERN;
+            tex->Pigment->pattern = PatternPtr(new ColourImagePattern());
+            if (ImagePatternImpl *pat = dynamic_cast<ImagePatternImpl *>(tex->Pigment->pattern.get()))
+                pat->pImage = image;
+            usedUvMaps = true;
+            parser->Warning("MTL map_Kd '%s' loaded.", mapKd.c_str());
+        }
+        else
+        {
+            MathColour mc = ToMathColour(RGBColour(kdR, kdG, kdB));
+            tex->Pigment->colour = TransColour(mc, 0.0, 0.0);
+        }
+    }
+    else
+    {
+        MathColour mc = ToMathColour(RGBColour(kdR, kdG, kdB));
+        tex->Pigment->colour = TransColour(mc, 0.0, 0.0);
+    }
+
+    tex->Finish->Ambient = MathColour(ambient);
+    tex->Finish->Diffuse = 0.7f;
+
+    const DBL specAmt = 0.2126 * ksR + 0.7152 * ksG + 0.0722 * ksB;
+    if (specAmt > 0.01)
+    {
+        tex->Finish->Specular = static_cast<SNGL>(min(1.0, max(0.0, specAmt)));
+        if (shininessNs > 1.0)
+            tex->Finish->Roughness = static_cast<SNGL>(1.0 / (1.0 + shininessNs / 10.0));
+    }
+
+    // Shininess / specular map: load image and drive specular strength (POV has no specular_map).
+    if (!mapKs.empty())
+    {
+        ImageData *specImg = LoadMtlImage(parser, mapKs, true);
+        if (specImg != nullptr)
+        {
+            usedUvMaps = true;
+            // Boost specular from Ks; keep shininess from Ns. Image is retained on a dummy
+            // bump-sized pattern only if no bump yet — prefer noting + using finish.
+            // Attach as second-layer hint via pigment filter layer is too heavy; keep finish.
+            Destroy_Image(specImg);
+            if (tex->Finish->Specular < 0.15f)
+                tex->Finish->Specular = 0.35f;
+            parser->Warning("MTL map_Ks / shininess map '%s' loaded (applied via finish specular/roughness from Ks/Ns).",
+                            mapKs.c_str());
+        }
+    }
+
+    const std::string &bumpPath = !mapBump.empty() ? mapBump : mapNorm;
+    if (!bumpPath.empty())
+    {
+        ImageData *image = LoadMtlImage(parser, bumpPath, false);
+        if (image != nullptr)
+        {
+            TNORMAL *tn = Create_Tnormal();
+            tn->Type = BITMAP_PATTERN;
+            tn->Amount = mapBump.empty() ? 0.25f : 0.35f;
+            shared_ptr<ImagePattern> pattern(new ImagePattern());
+            pattern->waveFrequency = 0.0;
+            tn->pattern = pattern;
+            if (ImagePatternImpl *pat = dynamic_cast<ImagePatternImpl *>(tn->pattern.get()))
+                pat->pImage = image;
+            tex->Tnormal = tn;
+            usedUvMaps = true;
+            parser->Warning("MTL %s map '%s' loaded as bump_map.",
+                            mapBump.empty() ? "norm" : "bump", bumpPath.c_str());
+        }
+    }
+    Post_Textures(tex);
+    return tex;
+}
+
+/// Load a Wavefront MTL file and append materials (Kd / maps → textures) not already present.
+static void LoadMtlLibrary(Parser* parser, const UCS2 *objFileName, const char *mtlFileName,
+                           vector<MaterialData>& materialList, bool &usedUvMaps)
+{
+    Path objPath(objFileName);
+    Path mtlRel(mtlFileName);
+    Path mtlPath(objPath, mtlRel);
+    UCS2String mtlUCS2 = mtlPath();
+    UCS2String found;
+    shared_ptr<IStream> holder = parser->Locate_File(mtlUCS2, POV_File_Text_User, found, false);
+    if (holder == nullptr)
+        holder = parser->Locate_File(SysToUCS2String(mtlFileName), POV_File_Text_User, found, false);
+    if (holder == nullptr)
+    {
+        parser->Warning("Cannot open mtllib '%s' for obj file %s.", mtlFileName, UCS2toSysString(objFileName).c_str());
+        return;
+    }
+
+    // IBufferedTextStream takes ownership of the IStream and deletes it in its destructor.
+    // Detach from shared_ptr so we do not double-free (intentionally leak the control block).
+    IStream *raw = holder.get();
+    IBufferedTextStream *text = new IBufferedTextStream(found.c_str(), raw);
+    new shared_ptr<IStream>(std::move(holder));
+    const UCS2String mtlFoundPath = found;
+
+    char word[kMaxObjBufferSize];
+    word[kMaxObjBufferSize - 1] = '*';
+
+    MaterialData pending;
+    pending.texture = nullptr;
+    bool havePending = false;
+    DBL kdR = 0.7, kdG = 0.7, kdB = 0.7;
+    DBL ksR = 0.0, ksG = 0.0, ksB = 0.0;
+    DBL kaAvg = 0.2;
+    DBL shininessNs = 0.0;
+    std::string mapKd, mapBump, mapKs, mapNorm;
+    size_t loadedBefore = materialList.size();
+
+    auto commitPending = [&]() {
+        if (!havePending)
+            return;
+        if (FindMaterialIndex(materialList, pending.mtlName) != 0)
+        {
+            havePending = false;
+            return;
+        }
+        pending.texture = MakeMtlMappedTexture(parser, kdR, kdG, kdB, kaAvg, ksR, ksG, ksB, shininessNs,
+                                               mapKd, mapBump, mapKs, mapNorm, usedUvMaps);
+        materialList.push_back(pending);
+        havePending = false;
+    };
+
+    while (!text->eof())
+    {
+        if (!ReadWord(word, text))
+        {
+            AdvanceLine(text);
+            continue;
+        }
+
+        if (strcmp(word, "newmtl") == 0)
+        {
+            commitPending();
+            if (!ReadWord(word, text))
+            {
+                parser->Warning("Malformed newmtl in '%s'.", mtlFileName);
+                AdvanceLine(text);
+                continue;
+            }
+            pending.mtlName = word;
+            pending.texture = nullptr;
+            kdR = kdG = kdB = 0.7;
+            ksR = ksG = ksB = 0.0;
+            kaAvg = 0.2;
+            shininessNs = 0.0;
+            mapKd.clear();
+            mapBump.clear();
+            mapKs.clear();
+            mapNorm.clear();
+            havePending = true;
+            AdvanceLine(text);
+            continue;
+        }
+
+        if (!havePending)
+        {
+            AdvanceLine(text);
+            continue;
+        }
+
+        if (strcmp(word, "Kd") == 0)
+        {
+            DBL v;
+            if (ReadFloat(v, word, text)) kdR = v;
+            if (ReadFloat(v, word, text)) kdG = v;
+            if (ReadFloat(v, word, text)) kdB = v;
+        }
+        else if (strcmp(word, "Ka") == 0)
+        {
+            DBL a = 0, b = 0, c = 0;
+            if (ReadFloat(a, word, text) && ReadFloat(b, word, text) && ReadFloat(c, word, text))
+                kaAvg = (a + b + c) / 3.0;
+        }
+        else if (strcmp(word, "Ks") == 0)
+        {
+            DBL v;
+            if (ReadFloat(v, word, text)) ksR = v;
+            if (ReadFloat(v, word, text)) ksG = v;
+            if (ReadFloat(v, word, text)) ksB = v;
+        }
+        else if (strcmp(word, "Ns") == 0)
+        {
+            DBL v;
+            if (ReadFloat(v, word, text))
+                shininessNs = v;
+        }
+        else if (strcmp(word, "map_Kd") == 0 || strcmp(word, "map_kd") == 0)
+        {
+            std::string name;
+            if (ReadMtlMapFilename(word, text, name))
+                mapKd = ResolveMtlMapPath(parser, mtlFoundPath, name);
+        }
+        else if (strcmp(word, "map_Ks") == 0 || strcmp(word, "map_ks") == 0 ||
+                 strcmp(word, "map_Ns") == 0 || strcmp(word, "map_ns") == 0)
+        {
+            std::string name;
+            if (ReadMtlMapFilename(word, text, name))
+                mapKs = ResolveMtlMapPath(parser, mtlFoundPath, name);
+        }
+        else if (strcmp(word, "bump") == 0 || strcmp(word, "map_bump") == 0 || strcmp(word, "map_Bump") == 0)
+        {
+            std::string name;
+            if (ReadMtlMapFilename(word, text, name))
+                mapBump = ResolveMtlMapPath(parser, mtlFoundPath, name);
+        }
+        else if (strcmp(word, "norm") == 0 || strcmp(word, "map_Kn") == 0 || strcmp(word, "map_kn") == 0)
+        {
+            std::string name;
+            if (ReadMtlMapFilename(word, text, name))
+                mapNorm = ResolveMtlMapPath(parser, mtlFoundPath, name);
+        }
+
+        AdvanceLine(text);
+    }
+    commitPending();
+    delete text;
+
+    parser->Warning("Loaded %lu material(s) from mtllib '%s'.",
+                    static_cast<unsigned long>(materialList.size() - loadedBefore), mtlFileName);
+}
 
 /// Fills the buffer with the next word from the current line.
 /// A trailing null character will be appended.
@@ -203,6 +580,7 @@ void Parser::Parse_Obj (Mesh* mesh)
     bool foundZeroNormal = false;
     bool fullyTextured = true;
     bool havePolygonFaces = false;
+    bool usedUvMaps = false;
 
     FaceData face;
     MaterialData material;
@@ -281,7 +659,12 @@ void Parser::Parse_Obj (Mesh* mesh)
 
     stream = Locate_File (fileName, POV_File_Text_OBJ, ign, true);
     if (stream != nullptr)
+    {
+        // IBufferedTextStream takes ownership of the IStream (deletes it in its destructor).
+        // Detach from shared_ptr to avoid double-free (intentional control-block leak).
         textStream = new IBufferedTextStream (fileName, stream.get());
+        new shared_ptr<IStream>(std::move(stream));
+    }
     if (!textStream)
         Error ("Cannot open obj file %s.", UCS2toSysString(fileName).c_str());
 
@@ -303,9 +686,36 @@ void Parser::Parse_Obj (Mesh* mesh)
         {
             case '\0': // empty line
             case '#': // comment
-            case 'g': // group ("g NAME")
             case 'o': // object name ("o NAME")
+            case 's': // smoothing group ("s N" / "s off")
                 skipLine = true;
+                break;
+
+            case 'g': // group ("g NAME") — Viewpoint OBJs use group names as material names
+                {
+                    if (ReadWord (wordBuffer, textStream))
+                    {
+                        size_t id = FindMaterialIndex (materialList, wordBuffer);
+                        if (id != 0)
+                            materialId = id;
+                    }
+                    skipLine = true;
+                }
+                break;
+
+            case TRIPLET('g','r','o'): // "group NAME"
+                if (strcmp (wordBuffer, "group") == 0)
+                {
+                    if (ReadWord (wordBuffer, textStream))
+                    {
+                        size_t id = FindMaterialIndex (materialList, wordBuffer);
+                        if (id != 0)
+                            materialId = id;
+                    }
+                    skipLine = true;
+                }
+                else
+                    unsupportedCmd = true;
                 break;
 
             case 'f': // face ("f VERTEXID VERTEXID VERTEXID ...")
@@ -355,41 +765,48 @@ void Parser::Parse_Obj (Mesh* mesh)
                         Error ("Inconsistent use of UV indices in obj file %s line %i", UCS2toSysString(fileName).c_str(), (int)textStream->line());
                     if ((haveNormal != 0) && (haveNormal != haveVertices))
                         Error ("Inconsistent use of normal indices in obj file %s line %i", UCS2toSysString(fileName).c_str(), (int)textStream->line());
-                    if (haveNormal > 0)
-                        faceList.push_back (face);
-                    else
-                        flatFaceList.push_back (face);
+                    // Faces are already emitted by the fan triangulation above; do not push again.
                 }
                 break;
 
-            case TRIPLET('m','t','l'): // presumably material library ("mtllib FILE FILE ...")
+            case TRIPLET('m','t','l'): // material library ("mtllib FILE ...")
                 if (strcmp (wordBuffer, "mtllib") == 0)
                 {
-                    // TODO
-                    unsupportedCmd = true;
+                    while (HasMoreWords (textStream))
+                    {
+                        if (!ReadWord (wordBuffer, textStream))
+                            break;
+                        LoadMtlLibrary (this, fileName, wordBuffer, materialList, usedUvMaps);
+                    }
+                    skipLine = true;
                 }
                 else
                     unsupportedCmd = true;
                 break;
 
-            case TRIPLET('u','s','e'): // presumably material selection ("usemtl NAME")
+            case TRIPLET('u','s','e'): // material selection ("usemtl NAME")
                 if (strcmp (wordBuffer, "usemtl") == 0)
                 {
                     if (!ReadWord (wordBuffer, textStream))
                         Error ("Invalid material name '%s' in obj file %s line %i", wordBuffer, UCS2toSysString(fileName).c_str(), (int)textStream->line());
-                    for (materialId = 0; materialId < materialList.size(); ++materialId)
+
+                    size_t existing = FindMaterialIndex (materialList, wordBuffer);
+                    if (existing != 0)
                     {
-                        if (materialList[materialId].mtlName.compare (wordBuffer) == 0)
-                            break;
+                        materialId = existing;
                     }
-                    if (materialId == materialList.size())
+                    else
                     {
                         material.mtlName = wordBuffer;
                         material.texture = nullptr;
                         std::string identifier = materialPrefix + std::string(wordBuffer) + materialSuffix;
                         SYM_ENTRY *symbol = mSymbolStack.Find_Symbol (identifier.c_str());
                         if (symbol == nullptr)
-                            Error ("No matching texture for obj file material '%s': Identifier '%s' not found.", wordBuffer, identifier.c_str());
+                        {
+                            Warning ("No matching texture for obj file material '%s' (identifier '%s'); using default texture.",
+                                     wordBuffer, identifier.c_str());
+                            material.texture = Copy_Textures(Default_Texture);
+                        }
                         else if (symbol->Token_Number == TEXTURE_ID_TOKEN)
                             material.texture = Copy_Textures(reinterpret_cast<TEXTURE *>(symbol->Data));
                         else if (symbol->Token_Number == MATERIAL_ID_TOKEN)
@@ -398,8 +815,9 @@ void Parser::Parse_Obj (Mesh* mesh)
                             Error ("No matching texture for obj file material '%s': Identifier '%s' is not a texture or material.", wordBuffer, identifier.c_str());
                         Post_Textures (material.texture);
                         materialList.push_back (material);
+                        materialId = materialList.size();
                     }
-                    materialId ++;
+                    skipLine = true;
                 }
                 else
                     unsupportedCmd = true;
@@ -474,24 +892,22 @@ void Parser::Parse_Obj (Mesh* mesh)
     for (size_t i = 0; i < vertexList.size(); ++i)
         vertexArray[i] = MeshVector (vertexList[i]);
 
-    if (!normalList.empty())
-    {
-        if (normalList.size() >= std::numeric_limits<int>::max())
-            Error ("Too many normal vectors in obj file.");
+    if (normalList.size() >= std::numeric_limits<int>::max())
+        Error ("Too many normal vectors in obj file.");
 
-        normalArray = reinterpret_cast<MeshVector *>(POV_MALLOC((normalList.size()+faceList.size())*sizeof(MeshVector), "triangle mesh data"));
-        for (size_t i = 0; i < normalList.size(); ++i)
+    // Always allocate room for per-face normals (Compute_Mesh_Triangle writes normalArray[j]).
+    normalArray = reinterpret_cast<MeshVector *>(POV_MALLOC((normalList.size()+faceList.size())*sizeof(MeshVector), "triangle mesh data"));
+    for (size_t i = 0; i < normalList.size(); ++i)
+    {
+        Vector3d& n = normalList[i];
+        if ((fabs(n.x()) < EPSILON) && (fabs(n.y()) < EPSILON) && (fabs(n.z()) < EPSILON))
         {
-            Vector3d& n = normalList[i];
-            if ((fabs(n.x()) < EPSILON) && (fabs(n.x()) < EPSILON) && (fabs(n.z()) < EPSILON))
-            {
-                n.x() = 1.0;  // make it nonzero
-                if (!foundZeroNormal)
-                    Warning("Normal vector in mesh2 cannot be zero - changing it to <1,0,0>.");
-                foundZeroNormal = true;
-            }
-            normalArray[i] = MeshVector(n);
+            n.x() = 1.0;  // make it nonzero
+            if (!foundZeroNormal)
+                Warning("Normal vector in mesh2 cannot be zero - changing it to <1,0,0>.");
+            foundZeroNormal = true;
         }
+        normalArray[i] = MeshVector(n);
     }
 
     // make sure we at least have one UV coordinate
@@ -563,17 +979,6 @@ void Parser::Parse_Obj (Mesh* mesh)
     mesh->Data->References = 1;
     mesh->Data->Tree = nullptr;
 
-    mesh->has_inside_vector = insideVector.IsNearNull (EPSILON);
-    if (mesh->has_inside_vector)
-    {
-        mesh->Data->Inside_Vect = insideVector.normalized();
-        mesh->Type &= ~PATCH_OBJECT;
-    }
-    else
-    {
-        mesh->Type |= PATCH_OBJECT;
-    }
-
     mesh->Data->Normals   = normalArray;
     mesh->Data->Triangles = triangleArray;
     mesh->Data->Vertices  = vertexArray;
@@ -589,6 +994,21 @@ void Parser::Parse_Obj (Mesh* mesh)
 
     if (!materialList.empty())
         Set_Flag(mesh, MULTITEXTURE_FLAG);
+    if (usedUvMaps)
+        Set_Flag(mesh, UV_FLAG);
+
+    // Match mesh/mesh2: zero inside_vector → patch object (no inside test).
+    if ((fabs(insideVector[X]) < EPSILON) && (fabs(insideVector[Y]) < EPSILON) && (fabs(insideVector[Z]) < EPSILON))
+    {
+        mesh->has_inside_vector = false;
+        mesh->Type |= PATCH_OBJECT;
+    }
+    else
+    {
+        mesh->Data->Inside_Vect = insideVector.normalized();
+        mesh->has_inside_vector = true;
+        mesh->Type &= ~PATCH_OBJECT;
+    }
 }
 
 }
