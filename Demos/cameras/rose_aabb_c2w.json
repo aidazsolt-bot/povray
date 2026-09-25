@@ -1,0 +1,37 @@
+{
+  "camera_angle_x": 0.6981317007977318,
+  "w": 640,
+  "h": 640,
+  "frames": [
+    {
+      "file_path": "reference/MISSING_put_training_frame_here.png",
+      "transform_matrix": [
+        [
+          -0.9438584893607354,
+          -0.07586806010248279,
+          0.3215201230373562,
+          2.0851
+        ],
+        [
+          0.0,
+          0.9732710140467311,
+          0.2296596029266962,
+          0.1118
+        ],
+        [
+          -0.3303500447429524,
+          0.21676616588557782,
+          -0.9186301090567386,
+          -10.5769
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  ],
+  "_comment": "Synthetic AABB framing for Rose \u2014 replace with real training transforms.json"
+}

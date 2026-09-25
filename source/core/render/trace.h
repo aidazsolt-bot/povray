@@ -67,6 +67,7 @@ namespace pov
 /// @{
 
 class PhotonGatherer;
+class GaussianSplatCloud;
 
 struct NoSomethingFlagRayObjectCondition final  : public RayObjectCondition
 {
@@ -343,6 +344,9 @@ class Trace
         CooperateFunctor& cooperate;
         MediaFunctor& media;
         RadiosityFunctor& radiosity;
+
+        /// Top-level GaussianSplatCloud objects (for segment GI hooks).
+        std::vector<GaussianSplatCloud*> gaussianSplatClouds;
 
     ///
     //*****************************************************************************
@@ -771,6 +775,11 @@ class Trace
         double ComputeConstantFogDepth(const Ray &ray, double depth, double width, const FOG *fog);
         double ComputeGroundFogDepth(const Ray& ray, double depth, double width, const FOG *fog);
         void ComputeRainbow(const Ray& ray, const Intersection& isect, MathColour& colour, ColourChannel& transm);
+
+        /// Integrate top-level GaussianSplatCloud volumes along the open ray segment
+        /// (primary miss / hard-surface hit) so bounce and GI rays also see splat emission.
+        void IntegrateGaussianSplatVolumes(const Ray& ray, const Intersection& bestisect, bool found,
+                                           MathColour& colour, ColourChannel& transm);
 
         /// Compute media effect on traversing light rays.
         ///

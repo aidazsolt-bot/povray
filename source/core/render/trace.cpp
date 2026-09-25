@@ -60,6 +60,7 @@
 #include "core/math/matrix.h"
 #include "core/render/ray.h"
 #include "core/scene/atmosphere.h"
+#include "core/shape/gaussiansplat.h"
 #include "core/scene/object.h"
 #include "core/scene/scenedata.h"
 #include "core/scene/tracethreaddata.h"
@@ -126,6 +127,14 @@ Trace::Trace(std::shared_ptr<SceneData> sd, TraceThreadData *td, const QualityFl
 
     if(sceneData->boundingMethod == 2)
         mailbox = BSPTree::Mailbox(sceneData->numberOfFiniteObjects);
+
+    // Cache top-level splat clouds for volume segment integration on bounce/GI rays.
+    for (std::vector<ObjectPtr>::iterator it = sceneData->objects.begin(); it != sceneData->objects.end(); ++it)
+    {
+        GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(*it);
+        if (cloud != nullptr)
+            gaussianSplatClouds.push_back(cloud);
+    }
 }
 
 Trace::~Trace()
@@ -203,6 +212,11 @@ double Trace::TraceRay(Ray& ray, MathColour& colour, ColourChannel& transm, COLC
         ComputeTextureColour(bestisect, colour, transm, ray, weight, false);
     else
         ComputeSky(ray, colour, transm);
+
+    // Offline GI: composite splat volumes along the open segment so secondary rays
+    // that hit a hard surface (or miss) still accumulate SH emission through the cloud.
+    if (!gaussianSplatClouds.empty() && !ray.IsShadowTestRay() && !ray.IsPhotonRay())
+        IntegrateGaussianSplatVolumes(ray, bestisect, found, colour, transm);
 
     if(qualityFlags.media && (ray.IsPhotonRay() == false) && (ray.IsHollowRay() == true))
     {
@@ -2763,6 +2777,59 @@ void Trace::ComputeOneWhiteLightRay(const LightSource &lightsource, double& ligh
             lightsourcedepth *= (-a);
             lightsourceray.Direction = -lightsource.Direction;
         }
+    }
+}
+
+void Trace::IntegrateGaussianSplatVolumes(const Ray& ray, const Intersection& bestisect, bool found,
+                                          MathColour& colour, ColourChannel& transm)
+{
+    const DBL t1 = found ? bestisect.Depth : BOUND_HUGE;
+    if (t1 <= EPSILON)
+        return;
+
+    const Vector3d origin = ray.Origin;
+    const Vector3d dir = ray.Direction;
+    const Vector3d viewDir = -dir;
+
+    for (size_t i = 0; i < gaussianSplatClouds.size(); ++i)
+    {
+        GaussianSplatCloud *cloud = gaussianSplatClouds[i];
+        if (cloud == nullptr || cloud->points.empty())
+            continue;
+        // Already composited as the closest surface hit — avoid double-counting.
+        if (found && bestisect.Object == cloud)
+            continue;
+        if (cloud->giWeight <= EPSILON)
+            continue;
+
+        if (cloud->bvh.empty())
+            cloud->BuildAcceleration();
+
+        BasicRay localRay(origin, dir);
+        DBL lenScale = 1.0;
+        if (cloud->Trans != nullptr)
+        {
+            MInvTransRay(localRay, BasicRay(origin, dir), cloud->Trans);
+            lenScale = localRay.Direction.length();
+            if (lenScale < EPSILON)
+                continue;
+            localRay.Direction /= lenScale;
+        }
+
+        const DBL localT1 = t1 * lenScale;
+        GaussianSplatSegmentResult seg;
+        const bool useKerbl = ray.IsPrimaryRay() && threadData != nullptr &&
+                              threadData->GaussianSplatCam.camValid &&
+                              threadData->GaussianSplatCam.pixelValid;
+        if (!cloud->IntegrateAlongRay(localRay.Origin, localRay.Direction, EPSILON, localT1,
+                                       -localRay.Direction, seg, threadData, useKerbl))
+            continue;
+
+        const DBL w = cloud->giWeight;
+        MathColour emit = ToMathColour(RGBColour(seg.colour[X] * w, seg.colour[Y] * w, seg.colour[Z] * w));
+        // Front-to-back: volume in front of the surface/sky colour.
+        colour = emit + colour * seg.transmittance;
+        transm *= ColourChannel(seg.transmittance);
     }
 }
 

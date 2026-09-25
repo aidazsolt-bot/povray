@@ -2,20 +2,20 @@
 #version 3.8;
 global_settings { assumed_gamma 1.0 }
 
-// Auto-generated training camera from rose_aabb_c2w.json frame 0
+// Auto-generated training camera from apple_transforms.json frame 0
 // Do not edit by hand — regenerate with transforms_to_pov_camera.py
-// Reference image (if present): reference/MISSING_put_training_frame_here.png
+// Reference image (if present): images/frame_00000.png
 camera {
-  location <2.08510000, 0.11180000, -10.57690000>
-  sky <-0.07586806, 0.97327101, 0.21676617>
-  look_at <-1.26267567, -2.27949303, -1.01181432>
-  angle 40.000000
+  location <-0.00000000, 1.00074292, 0.01396193>
+  sky <0.00000000, 0.01745241, -0.99984770>
+  look_at <-0.00000000, 0.00006118, -0.00350503>
+  angle 45.000000
 }
 
 background { color rgb 1.0 }
 
 gaussian_splat {
-  "models/Rose.ply"
+  "public/apple/splats/apple.ply"
   sh_degree 3
   samples 2
   alpha_stop 0.999

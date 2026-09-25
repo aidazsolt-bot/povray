@@ -1,6 +1,6 @@
-// Emission-only GaussianSplatCloud demo — Rose.ply
-// Soft BVH + SH compositing (no scene lights; appearance is baked in SH).
-// Camera framed from Assimp AABB of the same model.
+// Offline GaussianSplatCloud — Vol3DGS analytic volume α (samples >= 3).
+// samples 1 = 3D peak; 2 = 2D EWA; >=3 = ray-integrated ellipsoid opacity.
+// Still needs a training-view camera for photoreal SH; without it colours stay wrong.
 #version 3.8;
 global_settings { assumed_gamma 1.0 }
 
@@ -10,15 +10,15 @@ camera {
   angle 40
 }
 
-background { color rgb 0.02 }
+background { color rgb 0.0 }
 
-// Prefer dedicated SDL token; falls through Assimp splat → GaussianSplatCloud.
 gaussian_splat {
   "models/Rose.ply"
-  // max_count 50000   // optional throttle
-  // sh_degree 3       // 0..3 (default 3)
+  sh_degree 3
+  samples 4              // >=3 → Vol3DGS volume α
+  alpha_stop 0.999
+  opacity_cutoff 0.0039  // ~1/255
 }
 
-// Legacy aliases still work:
-//   ply { "models/Rose.ply" }
-//   assimp { "models/Rose.ply" }
+// From Demos/:
+//   ../unix/povray +W640 +H640 +A0.3 +AM2 +R2 -D -Oresults/rose_vol.png rose_photo.pov

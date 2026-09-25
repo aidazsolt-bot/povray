@@ -790,7 +790,8 @@ class Parser final
         ObjectPtr Parse_Assimp();
         ObjectPtr Parse_Gaussian_Splat();
         void Parse_Assimp_Mesh(Mesh*);
-        void Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree);
+        void Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
+                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight);
 #endif
         void Parse_Mesh1 (Mesh*);
         void Parse_Mesh2 (Mesh*);

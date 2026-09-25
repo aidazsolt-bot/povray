@@ -60,6 +60,7 @@
 #include "core/render/trace.h"
 #include "core/scene/object.h"
 #include "core/scene/scenedata.h"
+#include "core/scene/tracethreaddata.h"
 #include "core/shape/mesh.h"
 
 // this must be the last file included
@@ -293,6 +294,30 @@ void TracePixel::SetupCamera(const Camera& cam)
         cameraDirection.normalize();
     }
 
+    // Feed perspective basis into Gaussian-splat Kerbl projection (fx/fy filled per ray).
+    {
+        TraceThreadData::GaussianSplatProj& proj = threadData->GaussianSplatCam;
+        proj.camValid = false;
+        proj.pixelValid = false;
+        if (camera.Type == PERSPECTIVE_CAMERA)
+        {
+            const DBL lenR = cameraRight.length();
+            const DBL lenU = cameraUp.length();
+            const DBL lenD = cameraDirection.length();
+            if (lenR > EPSILON && lenU > EPSILON && lenD > EPSILON)
+            {
+                proj.origin = cameraLocation;
+                proj.right = cameraRight / lenR;
+                proj.up = cameraUp / lenU;
+                proj.forward = cameraDirection / lenD;
+                // fx,fy set in CreateCameraRay once width/height are known.
+                proj.fx = lenD / lenR; // temporary: NDC scale; multiplied by width later
+                proj.fy = lenD / lenU;
+                proj.camValid = true;
+            }
+        }
+    }
+
     if (focalBlurData != nullptr)
     {
         delete focalBlurData;
@@ -350,6 +375,7 @@ bool TracePixel::CreateCameraRay(Ray& ray, DBL x, DBL y, DBL width, DBL height, 
 
     // Create primary ray according to the camera used.
     ray.Origin = cameraLocation;
+    threadData->GaussianSplatCam.pixelValid = false;
 
     switch(camera.Type)
     {
@@ -363,6 +389,20 @@ bool TracePixel::CreateCameraRay(Ray& ray, DBL x, DBL y, DBL width, DBL height, 
 
             // Create primary ray.
             ray.Direction = cameraDirection + x0 * cameraRight + y0 * cameraUp;
+
+            // Kerbl Jacobian: screen sample in pixels from centre (+U right, +V up).
+            if (threadData->GaussianSplatCam.camValid && width > EPSILON && height > EPSILON)
+            {
+                TraceThreadData::GaussianSplatProj& proj = threadData->GaussianSplatCam;
+                const DBL lenR = cameraRight.length();
+                const DBL lenU = cameraUp.length();
+                const DBL lenD = cameraDirection.length();
+                proj.fx = width * lenD / lenR;
+                proj.fy = height * lenD / lenU;
+                proj.screenU = x0 * width;
+                proj.screenV = y0 * height;
+                proj.pixelValid = true;
+            }
 
             // Do focal blurring (by Dan Farmer).
             if(useFocalBlur)

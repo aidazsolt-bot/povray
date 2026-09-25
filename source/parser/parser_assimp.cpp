@@ -505,7 +505,7 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
             const aiVector3D &pos = mesh->mVertices[vi];
             const aiVector3D &dc = gs->mDC[vi];
             DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
-            if (opacity < 0.01)
+            if (opacity < (1.0 / 255.0))
                 continue;
 
             const aiVector3D &scl = gs->mScale[vi];
@@ -584,7 +584,7 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
             DBL g = 0.5 + kShC0 * dc.y;
             DBL b = 0.5 + kShC0 * dc.z;
             DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
-            if (opacity < 0.01)
+            if (opacity < (1.0 / 255.0))
                 continue;
 
             const aiVector3D &scl = gs->mScale[vi];
@@ -932,7 +932,8 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
 
 } // namespace
 
-void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree)
+void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
+                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -946,6 +947,28 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
         CASE (APPROXIMATE_TOKEN)
             approximate = true;
         END_CASE
+        CASE (OPACITY_CUTOFF_TOKEN)
+            opacityCutoff = Parse_Float();
+            if (opacityCutoff < 0.0) opacityCutoff = 0.0;
+        END_CASE
+        CASE (ALPHA_STOP_TOKEN)
+            alphaStop = Parse_Float();
+            if (alphaStop < 0.0) alphaStop = 0.0;
+            if (alphaStop > 1.0) alphaStop = 1.0;
+        END_CASE
+        CASE (SAMPLES_TOKEN)
+            samples = static_cast<int>(Parse_Float());
+            if (samples < 1) samples = 1;
+        END_CASE
+        CASE (MAX_INTERSECTIONS_TOKEN)
+            // Reuse as hit budget for offline quality (0 = default soft cap).
+            maxHits = static_cast<int>(Parse_Float());
+            if (maxHits < 0) maxHits = 0;
+        END_CASE
+        CASE (GI_WEIGHT_TOKEN)
+            giWeight = Parse_Float();
+            if (giWeight < 0.0) giWeight = 0.0;
+        END_CASE
         OTHERWISE
             UNGET
             EXIT
@@ -953,6 +976,23 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
     END_EXPECT
     (void)sphereScale;
 }
+
+namespace
+{
+
+void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, int samples, int maxHits, DBL giWeight)
+{
+    GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
+    if (cloud == nullptr)
+        return;
+    cloud->opacityCutoff = opacityCutoff;
+    cloud->alphaStop = alphaStop;
+    cloud->samples = samples;
+    cloud->maxHits = maxHits;
+    cloud->giWeight = giWeight;
+}
+
+} // namespace
 
 ObjectPtr Parser::Parse_Assimp()
 {
@@ -969,11 +1009,18 @@ ObjectPtr Parser::Parse_Assimp()
     size_t maxCount = 0;
     bool approximate = false;
     int shDegree = 3;
-    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
+    DBL opacityCutoff = 1.0 / 255.0;
+    DBL alphaStop = 0.999;
+    int samples = 4;
+    int maxHits = 0;
+    DBL giWeight = 1.0;
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight);
     result = Parse_Object_Mods(result);
     return result;
 }
@@ -993,11 +1040,18 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     size_t maxCount = 0;
     bool approximate = false;
     int shDegree = 3;
-    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
+    DBL opacityCutoff = 1.0 / 255.0;
+    DBL alphaStop = 0.999;
+    int samples = 4;
+    int maxHits = 0;
+    DBL giWeight = 1.0;
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight);
     result = Parse_Object_Mods(result);
     return result;
 }

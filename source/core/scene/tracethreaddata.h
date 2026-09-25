@@ -141,6 +141,33 @@ class TraceThreadData : public ThreadData
         bool GaussianSplatColourValid;
         /// Owned emission texture reused by GaussianSplatCloud::Determine_Textures.
         TEXTURE *GaussianSplatTexture;
+        /// Scratch hit list for GaussianSplatCloud::IntegrateAlongRay (reused per ray).
+        struct GaussianSplatHitRec
+        {
+            DBL t;
+            DBL w;
+            int idx;
+        };
+        std::vector<GaussianSplatHitRec> GaussianSplatHits;
+
+        /// Perspective camera projection for Kerbl Jacobian EWA (set by TracePixel).
+        struct GaussianSplatProj final
+        {
+            bool camValid;     ///< Camera basis + fx/fy ready.
+            bool pixelValid;   ///< Current primary-ray screen sample ready.
+            Vector3d origin;   ///< Camera location (world).
+            Vector3d right;    ///< Unit right.
+            Vector3d up;       ///< Unit up.
+            Vector3d forward;  ///< Unit look direction.
+            DBL fx;            ///< Focal length in pixels (horizontal).
+            DBL fy;            ///< Focal length in pixels (vertical).
+            DBL screenU;       ///< Current ray screen U (pixels from centre, +right).
+            DBL screenV;       ///< Current ray screen V (pixels from centre, +up).
+            GaussianSplatProj() :
+                camValid(false), pixelValid(false),
+                fx(1.0), fy(1.0), screenU(0.0), screenV(0.0) {}
+        };
+        GaussianSplatProj GaussianSplatCam;
 
         // data for waves and ripples pattern
         unsigned int numberOfWaves;

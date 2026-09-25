@@ -3,7 +3,8 @@
 /// @file core/shape/gaussiansplat.cpp
 ///
 /// Experimental 3D Gaussian Splatting cloud: BVH traversal, soft Gaussian
-/// weight along the ray, SH colour, front-to-back alpha compositing.
+/// weight along the ray (peak / Kerbl Jacobian EWA / Vol3DGS volume α), SH colour,
+/// front-to-back alpha compositing. Offline CPU path via IntegrateAlongRay.
 ///
 //******************************************************************************
 
@@ -49,8 +50,10 @@ const DBL kShC3[] = {
 
 const DBL kDepthTolerance = 1.0e-6;
 const DBL kWeightEps = 1.0e-4;
-const int kMaxHitsPerRay = 512;
+const int kDefaultMaxHits = 65536;
+const int kHardMaxHits = 262144;
 const DBL kExtentSigma = 3.0;
+const DBL kSqrtTwoPi = 2.5066282746310002; // √(2π)
 
 inline DBL Clamp01(DBL v)
 {
@@ -118,8 +121,13 @@ GaussianSplatCloud::GaussianSplatCloud() :
     NonsolidObject(GAUSSIAN_SPLAT_OBJECT),
     restCount(0),
     shDegree(3),
-    opacityCutoff(0.01),
-    alphaStop(0.995)
+    opacityCutoff(1.0 / 255.0),
+    alphaStop(0.999),
+    samples(4),
+    maxHits(0),
+    bvhLeafSize(1),
+    giWeight(1.0),
+    opacityScale(1.0)
 {
     Type |= PATCH_OBJECT | TEXTURED_OBJECT;
     Set_Flag(this, HOLLOW_FLAG);
@@ -142,6 +150,11 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->shDegree = shDegree;
     New->opacityCutoff = opacityCutoff;
     New->alphaStop = alphaStop;
+    New->samples = samples;
+    New->maxHits = maxHits;
+    New->bvhLeafSize = bvhLeafSize;
+    New->giWeight = giWeight;
+    New->opacityScale = opacityScale;
     New->bvh = bvh;
     New->bvhOrder = bvhOrder;
     New->Trans = Copy_Transform(Trans);
@@ -255,7 +268,8 @@ void GaussianSplatCloud::BuildBVHRecursive(int nodeIndex, int begin, int end, in
     node.bmax = bmax;
 
     const int count = end - begin;
-    if (count <= 4 || depth > 48)
+    const int leafSize = std::max(1, bvhLeafSize);
+    if (count <= leafSize || depth > 64)
     {
         node.left = -1;
         node.right = -1;
@@ -311,42 +325,225 @@ bool GaussianSplatCloud::RayAABB(const Vector3d& origin, const Vector3d& invDir,
 
 bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
                                            const Vector3d& origin, const Vector3d& dir,
-                                           DBL& tHit, DBL& weight) const
+                                           DBL tSeg0, DBL tSeg1, DBL& tHit, DBL& weight,
+                                           TraceThreadData *Thread, bool useKerbl) const
 {
-    if (sp.opacity < opacityCutoff)
+    const DBL opac = Clamp01(sp.opacity * opacityScale);
+    if (opac < opacityCutoff)
         return false;
 
-    MATRIX R;
-    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, R);
-
-    // Local = R^T * (p - mean), then divide by scale → unit isotropic Gaussian.
-    Vector3d delta = origin - sp.position;
-    Vector3d oL(
-        R[0][0] * delta[X] + R[1][0] * delta[Y] + R[2][0] * delta[Z],
-        R[0][1] * delta[X] + R[1][1] * delta[Y] + R[2][1] * delta[Z],
-        R[0][2] * delta[X] + R[1][2] * delta[Y] + R[2][2] * delta[Z]);
-    Vector3d dL(
-        R[0][0] * dir[X] + R[1][0] * dir[Y] + R[2][0] * dir[Z],
-        R[0][1] * dir[X] + R[1][1] * dir[Y] + R[2][1] * dir[Z],
-        R[0][2] * dir[X] + R[1][2] * dir[Y] + R[2][2] * dir[Z]);
+    MATRIX Rmat;
+    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
 
     const DBL sx = std::max(sp.scale[X], EPSILON);
     const DBL sy = std::max(sp.scale[Y], EPSILON);
     const DBL sz = std::max(sp.scale[Z], EPSILON);
-    oL[X] /= sx; oL[Y] /= sy; oL[Z] /= sz;
-    dL[X] /= sx; dL[Y] /= sy; dL[Z] /= sz;
 
-    const DBL dd = dL.lengthSqr();
-    if (dd < EPSILON)
-        return false;
-    tHit = -dot(oL, dL) / dd;
-    if (tHit < kDepthTolerance)
-        return false;
+    // Ray in Mahalanobis / unit-ellipsoid local space: x = o + t d → oL + t dL.
+    auto toLocal = [&](const Vector3d& w, Vector3d& out) {
+        out = Vector3d(
+            Rmat[0][0] * w[X] + Rmat[1][0] * w[Y] + Rmat[2][0] * w[Z],
+            Rmat[0][1] * w[X] + Rmat[1][1] * w[Y] + Rmat[2][1] * w[Z],
+            Rmat[0][2] * w[X] + Rmat[1][2] * w[Y] + Rmat[2][2] * w[Z]);
+        out[X] /= sx; out[Y] /= sy; out[Z] /= sz;
+    };
 
-    const Vector3d closest = oL + dL * tHit;
-    const DBL dist2 = closest.lengthSqr();
-    weight = std::exp(-0.5 * dist2);
-    return weight >= kWeightEps;
+    auto buildSigmaWorld = [&](DBL Sigma[3][3]) {
+        const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
+        for (int i = 0; i < 3; ++i)
+        {
+            for (int j = 0; j < 3; ++j)
+            {
+                Sigma[i][j] = Rmat[i][0] * s2x * Rmat[j][0]
+                            + Rmat[i][1] * s2y * Rmat[j][1]
+                            + Rmat[i][2] * s2z * Rmat[j][2];
+            }
+        }
+    };
+
+    // --- samples <= 1: legacy 3D Mahalanobis peak (fast, underestimates opacity) ---
+    if (samples <= 1)
+    {
+        Vector3d oL, dL;
+        toLocal(origin - sp.position, oL);
+        toLocal(dir, dL);
+        const DBL dd = dL.lengthSqr();
+        if (dd < EPSILON)
+            return false;
+        tHit = -dot(oL, dL) / dd;
+        if (tHit < tSeg0 || tHit > tSeg1)
+            return false;
+        const Vector3d closest = oL + dL * tHit;
+        const DBL g = std::exp(-0.5 * closest.lengthSqr());
+        weight = Clamp01(opac * g);
+        return weight >= opacityCutoff;
+    }
+
+    // --- samples == 2: Kerbl Jacobian EWA (primary) or plane-perp billboard fallback ---
+    if (samples == 2)
+    {
+        const TraceThreadData::GaussianSplatProj *proj =
+            (useKerbl && Thread != nullptr && Thread->GaussianSplatCam.camValid &&
+             Thread->GaussianSplatCam.pixelValid) ? &Thread->GaussianSplatCam : nullptr;
+
+        if (proj != nullptr)
+        {
+            // Camera space: X=right, Y=up, Z=forward.
+            const Vector3d rel = sp.position - proj->origin;
+            const DBL tx = dot(rel, proj->right);
+            const DBL ty = dot(rel, proj->up);
+            const DBL tz = dot(rel, proj->forward);
+            if (tz <= EPSILON)
+                return false;
+
+            tHit = dot(sp.position - origin, dir);
+            if (tHit < tSeg0 || tHit > tSeg1)
+                return false;
+
+            DBL SigmaW[3][3];
+            buildSigmaWorld(SigmaW);
+
+            // W rows = camera axes → Σ_cam = W Σ_world Wᵀ
+            const Vector3d axes[3] = { proj->right, proj->up, proj->forward };
+            DBL SigmaC[3][3];
+            for (int i = 0; i < 3; ++i)
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    DBL s = 0.0;
+                    for (int a = 0; a < 3; ++a)
+                    {
+                        DBL WaS = 0.0;
+                        for (int b = 0; b < 3; ++b)
+                            WaS += axes[i][b] * SigmaW[b][a];
+                        s += WaS * axes[j][a];
+                    }
+                    SigmaC[i][j] = s;
+                }
+            }
+
+            // J (2×3): affine approx of projective transform at mean (Kerbl et al.).
+            const DBL fx = proj->fx, fy = proj->fy;
+            const DBL invZ = 1.0 / tz;
+            const DBL invZ2 = invZ * invZ;
+            const DBL J00 = fx * invZ, J02 = -fx * tx * invZ2;
+            const DBL J11 = fy * invZ, J12 = -fy * ty * invZ2;
+
+            // cov2d = J * Σ_cam * Jᵀ  (2×2), then +0.3 px low-pass on diagonal.
+            auto Sj = [&](int row, int colJ) -> DBL {
+                // (Σ_cam * Jᵀ)[row][colJ]
+                if (colJ == 0)
+                    return SigmaC[row][0] * J00 + SigmaC[row][2] * J02;
+                return SigmaC[row][1] * J11 + SigmaC[row][2] * J12;
+            };
+            DBL cov00 = J00 * Sj(0, 0) + J02 * Sj(2, 0);
+            DBL cov01 = J00 * Sj(0, 1) + J02 * Sj(2, 1);
+            DBL cov11 = J11 * Sj(1, 1) + J12 * Sj(2, 1);
+            cov00 += 0.3;
+            cov11 += 0.3;
+
+            const DBL det = cov00 * cov11 - cov01 * cov01;
+            if (det < EPSILON)
+                return false;
+
+            const DBL meanU = fx * tx * invZ;
+            const DBL meanV = fy * ty * invZ;
+            const DBL du = proj->screenU - meanU;
+            const DBL dv = proj->screenV - meanV;
+            const DBL power = (cov11 * du * du - 2.0 * cov01 * du * dv + cov00 * dv * dv) / det;
+            if (power > (kExtentSigma * kExtentSigma))
+                return false;
+
+            weight = Clamp01(opac * std::exp(-0.5 * power));
+            return weight >= opacityCutoff;
+        }
+
+        // Billboard fallback: Σ projected into plane ⟂ ray (no perspective J).
+        const Vector3d om = sp.position - origin;
+        tHit = dot(om, dir);
+        if (tHit < tSeg0 || tHit > tSeg1)
+            return false;
+
+        const Vector3d mid = origin + dir * tHit;
+        const Vector3d delta = sp.position - mid;
+
+        DBL Sigma[3][3];
+        buildSigmaWorld(Sigma);
+
+        Vector3d axis = (std::fabs(dir[Z]) < 0.9) ? Vector3d(0.0, 0.0, 1.0) : Vector3d(0.0, 1.0, 0.0);
+        Vector3d u = cross(dir, axis);
+        const DBL ul = u.length();
+        if (ul < EPSILON)
+            return false;
+        u /= ul;
+        Vector3d v = cross(dir, u);
+
+        auto quadForm = [&](const Vector3d& e1, const Vector3d& e2) -> DBL {
+            const Vector3d Se2(
+                Sigma[0][0] * e2[X] + Sigma[0][1] * e2[Y] + Sigma[0][2] * e2[Z],
+                Sigma[1][0] * e2[X] + Sigma[1][1] * e2[Y] + Sigma[1][2] * e2[Z],
+                Sigma[2][0] * e2[X] + Sigma[2][1] * e2[Y] + Sigma[2][2] * e2[Z]);
+            return dot(e1, Se2);
+        };
+
+        const DBL eps2 = 1.0e-12;
+        const DBL a00 = quadForm(u, u) + eps2;
+        const DBL a01 = quadForm(u, v);
+        const DBL a11 = quadForm(v, v) + eps2;
+        const DBL det = a00 * a11 - a01 * a01;
+        if (det < EPSILON)
+            return false;
+
+        const DBL du = dot(delta, u);
+        const DBL dv = dot(delta, v);
+        const DBL power = (a11 * du * du - 2.0 * a01 * du * dv + a00 * dv * dv) / det;
+        if (power > (kExtentSigma * kExtentSigma))
+            return false;
+
+        weight = Clamp01(opac * std::exp(-0.5 * power));
+        return weight >= opacityCutoff;
+    }
+
+    // --- samples >= 3: Vol3DGS analytic volume α (Eq. 19) ---
+    // α = 1 − exp(−κ · G_peak · √(2π) · β), with erf segment clip (Eq. 18).
+    // Density κ uses Vol3DGS Eq. 20 style reparam so small 3DGS-trained scales
+    // stay opaque (raw opacity as κ underestimates when β ≪ 1).
+    {
+        Vector3d oL, dL;
+        toLocal(origin - sp.position, oL);
+        toLocal(dir, dL);
+        const DBL a = dL.lengthSqr(); // d^T Σ^{-1} d
+        if (a < EPSILON)
+            return false;
+
+        tHit = -dot(oL, dL) / a; // γ
+        const DBL beta = 1.0 / std::sqrt(a);
+        if (tHit < (tSeg0 - kExtentSigma * beta) || tHit > (tSeg1 + kExtentSigma * beta))
+            return false;
+
+        const Vector3d closest = oL + dL * tHit;
+        const DBL gPeak = std::exp(-0.5 * closest.lengthSqr());
+        if (gPeak < kWeightEps)
+            return false;
+
+        const DBL invSigma = 1.0 / (beta * std::sqrt(2.0));
+        const DBL tLo = std::max(tSeg0, tHit - kExtentSigma * beta);
+        const DBL tHi = std::min(tSeg1, tHit + kExtentSigma * beta);
+        if (tHi <= tLo)
+            return false;
+        const DBL erfHi = std::erf((tHi - tHit) * invSigma);
+        const DBL erfLo = std::erf((tLo - tHit) * invSigma);
+        const DBL integralG = gPeak * beta * kSqrtTwoPi * 0.5 * (erfHi - erfLo);
+        if (integralG <= 0.0)
+            return false;
+
+        // κ = −log(1 − 0.99 θ) · (1/3)(1/sx+1/sy+1/sz), θ := sigmoid opacity.
+        const DBL theta = std::min(opac, 0.999);
+        const DBL invScaleMean = (1.0 / sx + 1.0 / sy + 1.0 / sz) / 3.0;
+        const DBL kappa = -std::log(1.0 - 0.99 * theta) * invScaleMean;
+        weight = Clamp01(1.0 - std::exp(-kappa * integralG));
+        return weight >= opacityCutoff;
+    }
 }
 
 void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const
@@ -415,26 +612,23 @@ void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d
     rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
 }
 
-bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, TraceThreadData *Thread)
+bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3d& dir,
+                                           DBL t0, DBL t1, const Vector3d& viewDir,
+                                           GaussianSplatSegmentResult& out, TraceThreadData *Thread,
+                                           bool useKerbl) const
 {
-    if (points.empty())
+    out.colour = Vector3d(0.0, 0.0, 0.0);
+    out.transmittance = 1.0;
+    out.depth = 0.0;
+    out.valid = false;
+
+    if (points.empty() || Thread == nullptr || t1 <= t0)
         return false;
+
+    // BuildAcceleration is non-const; callers ensure BVH exists before render.
     if (bvh.empty())
-        BuildAcceleration();
+        return false;
 
-    BasicRay localRay(ray);
-    DBL lenScale = 1.0;
-    if (Trans != nullptr)
-    {
-        MInvTransRay(localRay, ray, Trans);
-        lenScale = localRay.Direction.length();
-        if (lenScale < EPSILON)
-            return false;
-        localRay.Direction /= lenScale;
-    }
-
-    const Vector3d origin = localRay.Origin;
-    const Vector3d dir = localRay.Direction;
     Vector3d invDir(
         (std::fabs(dir[X]) > EPSILON) ? (1.0 / dir[X]) : BOUND_HUGE,
         (std::fabs(dir[Y]) > EPSILON) ? (1.0 / dir[Y]) : BOUND_HUGE,
@@ -444,39 +638,48 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     if (!RayAABB(origin, invDir, bvh[0].bmin, bvh[0].bmax, rootNear, rootFar))
         return false;
 
-    // AABB hit is required; splat contributions follow.
-    struct HitRec { DBL t; DBL w; int idx; };
-    HitRec hits[kMaxHitsPerRay];
-    int nHits = 0;
+    const DBL seg0 = std::max(t0, rootNear);
+    const DBL seg1 = std::min(t1, rootFar);
+    if (seg1 <= seg0)
+        return false;
+
+    const int hitCap = std::min(kHardMaxHits, (maxHits > 0) ? maxHits : kDefaultMaxHits);
+    std::vector<TraceThreadData::GaussianSplatHitRec>& hits = Thread->GaussianSplatHits;
+    hits.clear();
+    if (static_cast<int>(hits.capacity()) < hitCap)
+        hits.reserve(static_cast<size_t>(std::min(hitCap, 4096)));
 
     int stack[64];
     int sp = 0;
     stack[sp++] = 0;
-    while (sp > 0)
+    while (sp > 0 && static_cast<int>(hits.size()) < hitCap)
     {
         const int ni = stack[--sp];
         const GaussianSplatBVHNode& node = bvh[static_cast<size_t>(ni)];
-        DBL t0, t1;
-        if (!RayAABB(origin, invDir, node.bmin, node.bmax, t0, t1))
+        DBL tn, tf;
+        if (!RayAABB(origin, invDir, node.bmin, node.bmax, tn, tf))
+            continue;
+        if (tf < seg0 || tn > seg1)
             continue;
         if (node.left < 0)
         {
-            for (int i = 0; i < node.count && nHits < kMaxHitsPerRay; ++i)
+            for (int i = 0; i < node.count && static_cast<int>(hits.size()) < hitCap; ++i)
             {
                 const int pi = bvhOrder[static_cast<size_t>(node.first + i)];
                 DBL tHit = 0, w = 0;
-                if (SplatContribution(points[static_cast<size_t>(pi)], origin, dir, tHit, w))
+                if (SplatContribution(points[static_cast<size_t>(pi)], origin, dir, seg0, seg1, tHit, w,
+                                      Thread, useKerbl))
                 {
-                    hits[nHits].t = tHit;
-                    hits[nHits].w = w;
-                    hits[nHits].idx = pi;
-                    ++nHits;
+                    TraceThreadData::GaussianSplatHitRec rec;
+                    rec.t = tHit;
+                    rec.w = w;
+                    rec.idx = pi;
+                    hits.push_back(rec);
                 }
             }
         }
         else
         {
-            // Push farther child first so nearer is processed first (approx).
             DBL l0, l1, r0, r1;
             const bool hitL = RayAABB(origin, invDir, bvh[static_cast<size_t>(node.left)].bmin,
                                       bvh[static_cast<size_t>(node.left)].bmax, l0, l1);
@@ -502,23 +705,26 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         }
     }
 
-    if (nHits == 0)
+    if (hits.empty())
         return false;
 
-    std::sort(hits, hits + nHits, [](const HitRec& a, const HitRec& b) { return a.t < b.t; });
+    std::sort(hits.begin(), hits.end(),
+              [](const TraceThreadData::GaussianSplatHitRec& a, const TraceThreadData::GaussianSplatHitRec& b) {
+                  return a.t < b.t;
+              });
 
     Vector3d acc(0.0, 0.0, 0.0);
-    DBL T = 1.0; // transmittance
+    DBL T = 1.0;
     DBL depthSum = 0.0;
     DBL depthW = 0.0;
-    const Vector3d viewDir = -dir; // toward camera along the ray
 
-    for (int i = 0; i < nHits && T > (1.0 - alphaStop); ++i)
+    for (size_t i = 0; i < hits.size() && T > (1.0 - alphaStop); ++i)
     {
-        const GaussianSplatPoint& spoint = points[static_cast<size_t>(hits[i].idx)];
-        const DBL alpha = Clamp01(spoint.opacity * hits[i].w);
+        // SplatContribution already returns final per-splat α (peak/EWA/volume).
+        const DBL alpha = hits[i].w;
         if (alpha < opacityCutoff)
             continue;
+        const GaussianSplatPoint& spoint = points[static_cast<size_t>(hits[i].idx)];
         Vector3d rgb;
         EvalColour(spoint, viewDir, rgb);
         acc += rgb * (alpha * T);
@@ -532,8 +738,42 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     if (alphaOut < opacityCutoff)
         return false;
 
-    DBL depth = (depthW > EPSILON) ? (depthSum / depthW) : hits[0].t;
-    depth /= lenScale;
+    out.colour = acc;
+    out.transmittance = T;
+    out.depth = (depthW > EPSILON) ? (depthSum / depthW) : hits[0].t;
+    out.valid = true;
+    return true;
+}
+
+bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, TraceThreadData *Thread)
+{
+    if (points.empty())
+        return false;
+    if (bvh.empty())
+        BuildAcceleration();
+
+    BasicRay localRay(ray);
+    DBL lenScale = 1.0;
+    if (Trans != nullptr)
+    {
+        MInvTransRay(localRay, ray, Trans);
+        lenScale = localRay.Direction.length();
+        if (lenScale < EPSILON)
+            return false;
+        localRay.Direction /= lenScale;
+    }
+
+    const Vector3d origin = localRay.Origin;
+    const Vector3d dir = localRay.Direction;
+    const Vector3d viewDir = -dir;
+
+    GaussianSplatSegmentResult seg;
+    const bool useKerbl = ray.IsPrimaryRay() && Thread != nullptr &&
+                          Thread->GaussianSplatCam.camValid && Thread->GaussianSplatCam.pixelValid;
+    if (!IntegrateAlongRay(origin, dir, kDepthTolerance, BOUND_HUGE, viewDir, seg, Thread, useKerbl))
+        return false;
+
+    DBL depth = seg.depth / lenScale;
     if (depth < kDepthTolerance || depth > MAX_DISTANCE)
         return false;
 
@@ -541,8 +781,9 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     if (!(Clip.empty() || Point_In_Clip(IPoint, Clip, Thread)))
         return false;
 
+    const DBL alphaOut = Clamp01(1.0 - seg.transmittance);
     // Un-premultiply: POV multiplies pigment RGB by Opacity(=1-transmit) for emission.
-    Vector3d rgb = acc;
+    Vector3d rgb = seg.colour;
     if (alphaOut > EPSILON)
         rgb /= alphaOut;
     rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));

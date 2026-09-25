@@ -556,7 +556,7 @@ static ObjectPtr BuildGaussianSplatObject(Parser* parser, shared_ptr<IStream>& s
 
         Vector3d center(scalars[ix], scalars[iy], scalars[iz]);
         DBL opacity = Sigmoid(scalars[iop]);
-        if (opacity < 0.01)
+        if (opacity < (1.0 / 255.0))
             continue;
 
         DBL sx = std::exp(scalars[is0]) * sphereScale;
@@ -912,8 +912,14 @@ ObjectPtr Parser::Parse_Ply()
     size_t maxCount = 0;
     bool approximate = false;
     int shDegree = 3;
+    DBL opacityCutoff = 0.01;
+    DBL alphaStop = 0.995;
+    int samples = 4;
+    int maxHits = 0;
+    DBL giWeight = 1.0;
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
-    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree);
+    Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
 #else
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -954,6 +960,14 @@ ObjectPtr Parser::Parse_Ply()
     if (IsGaussianSplatElement(*vertexEl))
     {
         result = BuildGaussianSplatObject(this, stream, header, *vertexEl, sphereScale, maxCount, approximate, shDegree);
+        if (GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(result))
+        {
+            cloud->opacityCutoff = opacityCutoff;
+            cloud->alphaStop = alphaStop;
+            cloud->samples = samples;
+            cloud->maxHits = maxHits;
+            cloud->giWeight = giWeight;
+        }
     }
     else
     {

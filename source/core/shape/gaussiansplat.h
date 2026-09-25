@@ -6,7 +6,8 @@
 ///
 /// Stores packed Inria/graphdeco-style Gaussians and composites soft splat
 /// contributions along a ray (BVH + SH colour + front-to-back alpha), returning
-/// a single emission hit for POV-Ray's surface shader.
+/// a single emission hit for POV-Ray's surface shader. Also exposes
+/// IntegrateAlongRay for offline segment integration (primary + bounce/GI).
 ///
 //******************************************************************************
 
@@ -44,6 +45,15 @@ struct GaussianSplatBVHNode final
     int count;  ///< Splat count (leaf).
 };
 
+/// Result of integrating one cloud along a ray segment.
+struct GaussianSplatSegmentResult final
+{
+    Vector3d colour;       ///< Premultiplied emission RGB along the segment.
+    DBL transmittance;     ///< Remaining transmittance (1 - accumulated alpha).
+    DBL depth;             ///< Weighted depth in world ray parameter space (caller scale).
+    bool valid;            ///< True if any contribution exceeded cutoff.
+};
+
 class GaussianSplatCloud final : public NonsolidObject
 {
     public:
@@ -53,6 +63,11 @@ class GaussianSplatCloud final : public NonsolidObject
         int shDegree;                ///< Max SH degree to evaluate (0..3).
         DBL opacityCutoff;           ///< Skip weights below this.
         DBL alphaStop;               ///< Stop compositing when accumulated alpha exceeds this.
+        int samples;                 ///< 1 = 3D peak; 2 = Kerbl Jacobian EWA; >=3 = Vol3DGS volume α.
+        int maxHits;                 ///< Cap on collected splat hits (0 = adaptive soft cap).
+        int bvhLeafSize;             ///< BVH leaf size (1 = quality).
+        DBL giWeight;                ///< Scale for bounce/GI segment contribution (Trace hook).
+        DBL opacityScale;            ///< Multiplier on splat opacity (offline density control).
 
         std::vector<GaussianSplatBVHNode> bvh;
         std::vector<int> bvhOrder; ///< Permutation of point indices used by BVH leaves.
@@ -79,12 +94,23 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Evaluate SH colour for view direction (world space, toward camera).
         void EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const;
 
+        /// Integrate SH emission + alpha along ray segment [t0,t1] in object/local space.
+        /// @param viewDir  Direction toward viewer (typically -dir).
+        /// @param Thread   Scratch for hit list (must be non-null).
+        /// @param useKerbl When true and Thread has a valid primary-ray projection, samples==2
+        ///                 uses Kerbl Σ'=JWΣWᵀJᵀ; otherwise plane-perp billboard EWA.
+        bool IntegrateAlongRay(const Vector3d& origin, const Vector3d& dir,
+                               DBL t0, DBL t1, const Vector3d& viewDir,
+                               GaussianSplatSegmentResult& out, TraceThreadData *Thread,
+                               bool useKerbl = false) const;
+
     private:
         void BuildBVHRecursive(int nodeIndex, int begin, int end, int depth);
         bool RayAABB(const Vector3d& origin, const Vector3d& invDir, const Vector3d& bmin, const Vector3d& bmax,
                      DBL& tNear, DBL& tFar) const;
         bool SplatContribution(const GaussianSplatPoint& sp, const Vector3d& origin, const Vector3d& dir,
-                               DBL& tHit, DBL& weight) const;
+                               DBL tSeg0, DBL tSeg1, DBL& tHit, DBL& weight,
+                               TraceThreadData *Thread, bool useKerbl) const;
 };
 
 }

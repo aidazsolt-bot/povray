@@ -91,6 +91,7 @@ TraceThreadData::TraceThreadData(std::shared_ptr<SceneData> sd, size_t seed) :
 
     GaussianSplatColourValid = false;
     GaussianSplatTexture = nullptr;
+    GaussianSplatCam = GaussianSplatProj();
 
     for(std::vector<LightSource *>::iterator it = sceneData->lightSources.begin(); it != sceneData->lightSources.end(); it++)
         lightSources.push_back(static_cast<LightSource *> (Copy_Object(*it)));
