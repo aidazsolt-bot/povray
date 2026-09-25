@@ -16,7 +16,7 @@ jobs:
     steps:
 
     - name: 'Check out Repository'
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
 
     - name: 'Install Prerequisites'
       uses: POV-Ray/povray/.github/actions/unix_getlibs@gh-actions-v1
@@ -71,7 +71,7 @@ jobs:
     steps:
 
     - name: 'Check out Repository'
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
 
     - name: 'Add MSBuild to PATH'
       uses: microsoft/setup-msbuild@v1.0.2
