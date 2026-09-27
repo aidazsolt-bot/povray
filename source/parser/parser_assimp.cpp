@@ -928,7 +928,10 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
 } // namespace
 
 void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
-                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight)
+                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight,
+                                        bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
+                                        DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
+                                        DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -941,6 +944,31 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
         END_CASE
         CASE (APPROXIMATE_TOKEN)
             approximate = true;
+        END_CASE
+        CASE (AS_SURFACE_TOKEN)
+            asSurface = true;
+        END_CASE
+        CASE (SURFACE_SMOOTH_TOKEN)
+            surfaceSmooth = true;
+        END_CASE
+        CASE (FILTER_FLOATERS_TOKEN)
+            filterFloaters = true;
+            floaterVoxelSize = Allow_Float(0.05);
+            Parse_Comma();
+            floaterVoxelOpacity = Allow_Float(0.1);
+            Parse_Comma();
+            floaterMinOpacity = Allow_Float(0.004);
+        END_CASE
+        CASE (NO_FILTER_FLOATERS_TOKEN)
+            filterFloaters = false;
+        END_CASE
+        CASE (VOXEL_SIZE_TOKEN)
+            surfaceVoxelSize = Parse_Float();
+            if (surfaceVoxelSize < 0.0) surfaceVoxelSize = 0.0;
+        END_CASE
+        CASE (VOXEL_OPACITY_TOKEN)
+            surfaceVoxelOpacity = Parse_Float();
+            if (surfaceVoxelOpacity < 0.0) surfaceVoxelOpacity = 0.0;
         END_CASE
         CASE (OPACITY_CUTOFF_TOKEN)
             opacityCutoff = Parse_Float();
@@ -975,7 +1003,10 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
 namespace
 {
 
-void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, int samples, int maxHits, DBL giWeight)
+void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, int samples, int maxHits, DBL giWeight,
+                               bool asSurface, bool surfaceSmooth, bool filterFloaters,
+                               DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
+                               DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
@@ -985,6 +1016,42 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
     cloud->samples = samples;
     cloud->maxHits = maxHits;
     cloud->giWeight = giWeight;
+    cloud->asSurface = asSurface;
+    cloud->surfaceSmooth = surfaceSmooth;
+    cloud->filterFloaters = filterFloaters;
+    cloud->surfaceVoxelSize = surfaceVoxelSize;
+    cloud->surfaceVoxelOpacity = surfaceVoxelOpacity;
+    cloud->floaterVoxelSize = floaterVoxelSize;
+    cloud->floaterVoxelOpacity = floaterVoxelOpacity;
+    cloud->floaterMinOpacity = floaterMinOpacity;
+}
+
+ObjectPtr MaybeConvertToSurfaceMesh(Parser *parser, ObjectPtr obj)
+{
+    GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
+    if (cloud == nullptr || !cloud->asSurface)
+        return obj;
+    Mesh *mesh = cloud->BuildSurfaceMesh();
+    if (mesh == nullptr)
+        parser->Error("as_surface: opacity voxel mesh produced no triangles (try lowering opacity / denser voxels).");
+
+    // Transfer IOR/interior from the splat object (rose_ior-style) onto the mesh.
+    mesh->interior = cloud->interior;
+    mesh->Interior_Texture = cloud->Interior_Texture;
+    cloud->Interior_Texture = nullptr;
+
+    mesh->has_inside_vector = true;
+    if (mesh->Data != nullptr)
+        mesh->Data->Inside_Vect = Vector3d(0.0, 1.0, 0.0);
+    Clear_Flag(mesh, HOLLOW_FLAG);
+
+    parser->Warning("as_surface: built SuperSplat-style %s mesh with %d triangle(s), %d texture(s)%s.",
+                    cloud->surfaceSmooth ? "smooth-MC" : "voxel-faces",
+                    static_cast<int>(mesh->Data->Number_Of_Triangles),
+                    static_cast<int>(mesh->Number_Of_Textures),
+                    (mesh->interior != nullptr && mesh->interior->IOR > 1.0 + EPSILON) ? ", with interior IOR" : "");
+    delete cloud;
+    return reinterpret_cast<ObjectPtr>(mesh);
 }
 
 } // namespace
@@ -1009,14 +1076,39 @@ ObjectPtr Parser::Parse_Assimp()
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
+    bool asSurface = false;
+    bool surfaceSmooth = false;
+    bool filterFloaters = true;
+    DBL surfaceVoxelSize = 0.0;
+    DBL surfaceVoxelOpacity = 0.1;
+    DBL floaterVoxelSize = 0.05;
+    DBL floaterVoxelOpacity = 0.1;
+    DBL floaterMinOpacity = 0.004;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                               asSurface, surfaceSmooth, filterFloaters,
+                               surfaceVoxelSize, surfaceVoxelOpacity,
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight);
-    result = Parse_Object_Mods(result);
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                              asSurface, surfaceSmooth, filterFloaters,
+                              surfaceVoxelSize, surfaceVoxelOpacity,
+                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+    // For as_surface: parse texture/interior onto the cloud first so SH colours can
+    // pick up the rose_ior-style finish and the mesh inherits interior IOR.
+    if (asSurface)
+    {
+        result = Parse_Object_Mods(result);
+        result = MaybeConvertToSurfaceMesh(this, result);
+    }
+    else
+    {
+        result = MaybeConvertToSurfaceMesh(this, result);
+        result = Parse_Object_Mods(result);
+    }
     return result;
 }
 
@@ -1040,14 +1132,39 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
+    bool asSurface = false;
+    bool surfaceSmooth = false;
+    bool filterFloaters = true;
+    DBL surfaceVoxelSize = 0.0;
+    DBL surfaceVoxelOpacity = 0.1;
+    DBL floaterVoxelSize = 0.05;
+    DBL floaterVoxelOpacity = 0.1;
+    DBL floaterMinOpacity = 0.004;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                               asSurface, surfaceSmooth, filterFloaters,
+                               surfaceVoxelSize, surfaceVoxelOpacity,
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight);
-    result = Parse_Object_Mods(result);
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                              asSurface, surfaceSmooth, filterFloaters,
+                              surfaceVoxelSize, surfaceVoxelOpacity,
+                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+    // For as_surface: parse texture/interior onto the cloud first so SH colours can
+    // pick up the rose_ior-style finish and the mesh inherits interior IOR.
+    if (asSurface)
+    {
+        result = Parse_Object_Mods(result);
+        result = MaybeConvertToSurfaceMesh(this, result);
+    }
+    else
+    {
+        result = MaybeConvertToSurfaceMesh(this, result);
+        result = Parse_Object_Mods(result);
+    }
     return result;
 }
 

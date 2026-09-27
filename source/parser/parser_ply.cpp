@@ -918,8 +918,19 @@ ObjectPtr Parser::Parse_Ply()
     int maxHits = 0;
     DBL giWeight = 1.0;
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+    bool asSurface = false;
+    bool surfaceSmooth = false;
+    bool filterFloaters = true;
+    DBL surfaceVoxelSize = 0.0;
+    DBL surfaceVoxelOpacity = 0.1;
+    DBL floaterVoxelSize = 0.05;
+    DBL floaterVoxelOpacity = 0.1;
+    DBL floaterMinOpacity = 0.004;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, samples, maxHits, giWeight);
+                               opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                               asSurface, surfaceSmooth, filterFloaters,
+                               surfaceVoxelSize, surfaceVoxelOpacity,
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
 #else
     EXPECT
         CASE (MAX_COUNT_TOKEN)

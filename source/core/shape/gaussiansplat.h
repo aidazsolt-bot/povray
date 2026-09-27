@@ -22,6 +22,8 @@
 namespace pov
 {
 
+class Mesh;
+
 #define GAUSSIAN_SPLAT_OBJECT (PATCH_OBJECT)
 
 /// Camera basis for screen-space projection (mirrors TraceThreadData::GaussianSplatProj).
@@ -83,6 +85,19 @@ class GaussianSplatCloud final : public NonsolidObject
         /// When true (or auto-detected from scene texture/interior): splat RGB feeds
         /// pigment + POV finish/IOR instead of pure emission billboards.
         bool materialShading;
+        /// Drop view rays / pixels that collect only one contributing splat
+        /// (typical soft edge / floater fringe). Off = legacy compositing.
+        bool cullSingletonHits;
+        /// SuperSplat-style opacity voxel surface (as_surface): replace cloud with Mesh.
+        bool asSurface;
+        bool surfaceSmooth;       ///< true = marching cubes; false = voxel faces (default).
+        bool filterFloaters;      ///< SuperSplat --filter-floaters (default on for as_surface).
+        DBL surfaceVoxelSize;     ///< World units; 0 = auto (bbox diagonal / 120). SuperSplat default 0.05.
+        DBL surfaceVoxelOpacity;  ///< Occupancy threshold. SuperSplat --voxel-opacity default 0.1.
+        DBL surfaceMinOpacity;    ///< Drop Gaussians below this (sigmoid space). SuperSplat 1/255.
+        DBL floaterVoxelSize;     ///< SuperSplat filter-floaters size default 0.05.
+        DBL floaterVoxelOpacity;  ///< SuperSplat filter-floaters opacity default 0.1.
+        DBL floaterMinOpacity;    ///< SuperSplat filter-floaters min default 0.004.
 
         std::vector<GaussianSplatBVHNode> bvh;
         std::vector<int> bvhOrder; ///< Permutation of point indices used by BVH leaves.
@@ -157,6 +172,10 @@ class GaussianSplatCloud final : public NonsolidObject
         /// SuperSplat-style pixel: tile lookup → depth sort → 2D EWA front-to-back blend.
         bool CompositeProjectedPixel(DBL screenU, DBL screenV,
                                      GaussianSplatSegmentResult& out, TraceThreadData *Thread) const;
+
+        /// Binary opacity-voxel occupancy (SuperSplat collision defaults) + marching
+        /// cubes. Triangle pigments/normals are computed here via EvalColour (not Assimp).
+        Mesh *BuildSurfaceMesh() const;
 
     private:
         void BuildBVHRecursive(int nodeIndex, int begin, int end, int depth);

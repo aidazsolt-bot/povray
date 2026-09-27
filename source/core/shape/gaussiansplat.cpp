@@ -151,7 +151,17 @@ GaussianSplatCloud::GaussianSplatCloud() :
     bvhLeafSize(1),
     giWeight(1.0),
     opacityScale(1.0),
-    materialShading(false)
+    materialShading(false),
+    cullSingletonHits(true),
+    asSurface(false),
+    surfaceSmooth(false),
+    filterFloaters(true),
+    surfaceVoxelSize(0.0),
+    surfaceVoxelOpacity(0.1),
+    surfaceMinOpacity(1.0 / 255.0),
+    floaterVoxelSize(0.05),
+    floaterVoxelOpacity(0.1),
+    floaterMinOpacity(0.004)
 {
     Type |= PATCH_OBJECT | TEXTURED_OBJECT;
     Set_Flag(this, HOLLOW_FLAG);
@@ -180,6 +190,16 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->giWeight = giWeight;
     New->opacityScale = opacityScale;
     New->materialShading = materialShading;
+    New->cullSingletonHits = cullSingletonHits;
+    New->asSurface = asSurface;
+    New->surfaceSmooth = surfaceSmooth;
+    New->filterFloaters = filterFloaters;
+    New->surfaceVoxelSize = surfaceVoxelSize;
+    New->surfaceVoxelOpacity = surfaceVoxelOpacity;
+    New->surfaceMinOpacity = surfaceMinOpacity;
+    New->floaterVoxelSize = floaterVoxelSize;
+    New->floaterVoxelOpacity = floaterVoxelOpacity;
+    New->floaterMinOpacity = floaterMinOpacity;
     New->bvh = bvh;
     New->bvhOrder = bvhOrder;
     New->Trans = Copy_Transform(Trans);
@@ -760,6 +780,10 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     if (hits.empty())
         return false;
 
+    // Singleton view-ray cull: one splat alone is usually a soft edge / floater.
+    if (cullSingletonHits && hits.size() < 2)
+        return false;
+
     std::sort(hits.begin(), hits.end(),
               [](const TraceThreadData::GaussianSplatHitRec& a, const TraceThreadData::GaussianSplatHitRec& b) {
                   return a.t < b.t;
@@ -1070,9 +1094,13 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
     if (hits.empty())
         return false;
 
+    // Singleton view-ray cull: one splat alone is usually a soft edge / floater.
+    if (cullSingletonHits && hits.size() < 2)
+        return false;
+
     std::sort(hits.begin(), hits.end(),
               [](const TraceThreadData::GaussianSplatHitRec& a, const TraceThreadData::GaussianSplatHitRec& b) {
-                  return a.t < b.t; // near first → front-to-back
+                  return a.t < b.t; // near first -> front-to-back
               });
 
     Vector3d acc(0.0, 0.0, 0.0);
