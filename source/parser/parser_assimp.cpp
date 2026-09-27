@@ -85,16 +85,6 @@ inline DBL Sigmoid(DBL x)
     return 1.0 / (1.0 + std::exp(-x));
 }
 
-bool PathLooksLikePly(const char* path)
-{
-    if (path == nullptr)
-        return false;
-    const char* dot = std::strrchr(path, '.');
-    if (dot == nullptr)
-        return false;
-    return (std::strcmp(dot, ".ply") == 0) || (std::strcmp(dot, ".PLY") == 0);
-}
-
 void QuaternionToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
 {
     DBL n = std::sqrt(w * w + x * x + y * y + z * z);
@@ -413,7 +403,7 @@ std::string ResolveAssimpPath(Parser *parser, UCS2 *fileName)
     return UCS2toSysString(fileName);
 }
 
-unsigned AssimpPostProcessFlags(const char *sysPath, bool preTransformVertices)
+unsigned AssimpPostProcessFlags(bool preTransformVertices, bool hasGaussianSplat)
 {
     unsigned flags =
         aiProcess_Triangulate |
@@ -421,8 +411,9 @@ unsigned AssimpPostProcessFlags(const char *sysPath, bool preTransformVertices)
         aiProcess_SortByPType;
     if (preTransformVertices)
         flags |= aiProcess_PreTransformVertices;
-    // JoinIdenticalVertices can scramble 3DGS ↔ vertex indexing on PLY (Arris / RenderAssimp).
-    if (!PathLooksLikePly(sysPath))
+    // JoinIdenticalVertices can scramble 3DGS <-> vertex indexing (Arris / RenderAssimp).
+    // Gate on splat presence, not file extension (mesh PLYs still benefit from joining).
+    if (!hasGaussianSplat)
         flags |= aiProcess_JoinIdenticalVertices | aiProcess_ImproveCacheLocality;
     return flags;
 }
@@ -829,9 +820,10 @@ void BuildMeshFromAssimp(Parser *parser, Mesh *outMesh, const aiScene *scene, co
 
 const aiScene *ImportAssimpScene(Parser *parser, Assimp::Importer &importer, const std::string &sysPath)
 {
-    // First pass without PreTransformVertices so animation clips remain available for reporting.
+    // First pass: no vertex join (splat unknown yet) and no PreTransformVertices so
+    // animation clips remain available for reporting.
     // (aiProcess_PreTransformVertices bakes bind pose and drops mAnimations.)
-    const aiScene *probe = importer.ReadFile(sysPath, AssimpPostProcessFlags(sysPath.c_str(), false));
+    const aiScene *probe = importer.ReadFile(sysPath, AssimpPostProcessFlags(false, true));
     if (probe == nullptr || (!probe->HasMeshes() && probe->mNumMeshes == 0))
     {
         const char *err = importer.GetErrorString();
@@ -839,8 +831,11 @@ const aiScene *ImportAssimpScene(Parser *parser, Assimp::Importer &importer, con
     }
     ReportAnimations(parser, probe);
 
+    const bool hasGaussianSplat = aiSceneHasGaussianSplat(probe) != 0;
+
     // Second pass: bake node transforms into mesh data (bind pose) for POV geometry.
-    const aiScene *scene = importer.ReadFile(sysPath, AssimpPostProcessFlags(sysPath.c_str(), true));
+    // Enable JoinIdenticalVertices only when this is not a Gaussian splat cloud.
+    const aiScene *scene = importer.ReadFile(sysPath, AssimpPostProcessFlags(true, hasGaussianSplat));
     if (scene == nullptr || (!scene->HasMeshes() && scene->mNumMeshes == 0))
     {
         const char *err = importer.GetErrorString();

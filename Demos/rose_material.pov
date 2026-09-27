@@ -19,7 +19,7 @@ gaussian_splat {
   "models/Rose.ply"
   sh_degree 3
   samples 2
-  alpha_stop 0.999
+  alpha_stop 0.75
   opacity_cutoff 0.0039
   gi_weight 0
   texture {
