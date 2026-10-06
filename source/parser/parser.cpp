@@ -351,6 +351,9 @@ void Parser::Run()
     if(mExperimentalFlags.functionHf)           featureList.push_back("function '.hf'");
     if(mExperimentalFlags.meshCamera)           featureList.push_back("mesh camera");
     if(mExperimentalFlags.objImport)            featureList.push_back("wavefront obj import");
+    if(mExperimentalFlags.plyImport)            featureList.push_back("ply import");
+    if(mExperimentalFlags.assimpImport)         featureList.push_back("assimp import");
+    if(mExperimentalFlags.assimpImport)         featureList.push_back("gaussian_splat");
     if(mExperimentalFlags.slopeAltitude)        featureList.push_back("slope pattern altitude");
     if(mExperimentalFlags.spline)               featureList.push_back("spline");
     if(mExperimentalFlags.subsurface)           featureList.push_back("subsurface light transport");
@@ -3583,7 +3586,7 @@ ObjectPtr Parser::Parse_Mesh()
 
     Object = new Mesh();
 
-#if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT
+#if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT || POV_PARSER_EXPERIMENTAL_PLY_IMPORT || POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
 
     EXPECT_ONE
 
@@ -3594,10 +3597,26 @@ ObjectPtr Parser::Parse_Mesh()
             Parse_Mesh2 (Object);
         END_CASE
 
+#if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT
         CASE (OBJ_TOKEN)
             mExperimentalFlags.objImport = true;
             Parse_Obj (Object);
         END_CASE
+#endif
+
+#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+        CASE (PLY_TOKEN)
+            mExperimentalFlags.plyImport = true;
+            Parse_Ply_Mesh (Object);
+        END_CASE
+#endif
+
+#if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+        CASE (ASSIMP_TOKEN)
+            mExperimentalFlags.assimpImport = true;
+            Parse_Assimp_Mesh (Object);
+        END_CASE
+#endif
 
         OTHERWISE
             UNGET
@@ -6380,6 +6399,21 @@ ObjectPtr Parser::Parse_Object ()
             Object = Parse_Mesh2();
         END_CASE
         /* NK ---- */
+
+#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+        CASE (PLY_TOKEN)
+            Object = Parse_Ply();
+        END_CASE
+#endif
+
+#if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+        CASE (ASSIMP_TOKEN)
+            Object = Parse_Assimp();
+        END_CASE
+        CASE (GAUSSIAN_SPLAT_TOKEN)
+            Object = Parse_Gaussian_Splat();
+        END_CASE
+#endif
 
         CASE (TEXT_TOKEN)
             Object = Parse_TrueType ();
