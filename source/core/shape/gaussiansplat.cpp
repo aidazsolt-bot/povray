@@ -216,6 +216,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     cullSingletonHits(true),
     khrEllipse(false),
     asSurface(false),
+    inverseSurface(false),
     surfaceSmooth(false),
     filterFloaters(true),
     surfaceVoxelSize(0.0),
@@ -255,6 +256,8 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->cullSingletonHits = cullSingletonHits;
     New->khrEllipse = khrEllipse;
     New->asSurface = asSurface;
+    New->inverseSurface = inverseSurface;
+    New->exportMeshPath = exportMeshPath;
     New->surfaceSmooth = surfaceSmooth;
     New->filterFloaters = filterFloaters;
     New->surfaceVoxelSize = surfaceVoxelSize;

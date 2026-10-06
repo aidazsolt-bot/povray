@@ -19,6 +19,7 @@
 #include "core/scene/object.h"
 
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace pov
@@ -97,6 +98,11 @@ class GaussianSplatCloud final : public NonsolidObject
         bool khrEllipse;
         /// SuperSplat-style opacity voxel surface (as_surface): replace cloud with Mesh.
         bool asSurface;
+        /// Inverse-surface extract: opaque MC mesh from occupancy (no volume, no IOR).
+        /// Implies asSurface + surfaceSmooth + filterFloaters; strips interior on convert.
+        bool inverseSurface;
+        /// Optional filesystem path to write extracted mesh as Wavefront OBJ (ASCII).
+        std::string exportMeshPath;
         bool surfaceSmooth;       ///< true = marching cubes; false = voxel faces (default).
         bool filterFloaters;      ///< SuperSplat --filter-floaters (default on for as_surface).
         DBL surfaceVoxelSize;     ///< World units; 0 = auto (bbox diagonal / 120). SuperSplat default 0.05.

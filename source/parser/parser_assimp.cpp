@@ -932,7 +932,7 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
-                                        bool &khrEllipse)
+                                        bool &khrEllipse, bool &inverseSurface, std::string &exportMeshPath)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -953,6 +953,22 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             opacityCutoff = 1.0 / 255.0;
             alphaStop = 0.999;
             asSurface = false;
+            inverseSurface = false;
+        END_CASE
+        CASE (INVERSE_SURFACE_TOKEN)
+            // Opaque mesh extract from splat occupancy (no volume path, no IOR).
+            inverseSurface = true;
+            asSurface = true;
+            surfaceSmooth = true;
+            filterFloaters = true;
+            khrEllipse = false;
+        END_CASE
+        CASE (EXPORT_MESH_TOKEN)
+            {
+                UCS2 *path = Parse_String(true);
+                exportMeshPath = UCS2toSysString(path);
+                POV_FREE(path);
+            }
         END_CASE
         CASE (AS_SURFACE_TOKEN)
             asSurface = true;
@@ -1016,7 +1032,7 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
                                bool asSurface, bool surfaceSmooth, bool filterFloaters,
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
                                DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity,
-                               bool khrEllipse)
+                               bool khrEllipse, bool inverseSurface, const std::string &exportMeshPath)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
@@ -1035,15 +1051,60 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
     cloud->floaterVoxelOpacity = floaterVoxelOpacity;
     cloud->floaterMinOpacity = floaterMinOpacity;
     cloud->khrEllipse = khrEllipse;
+    cloud->inverseSurface = inverseSurface;
+    cloud->exportMeshPath = exportMeshPath;
     if (khrEllipse)
     {
         cloud->samples = 2;
         cloud->cullSingletonHits = false;
         cloud->asSurface = false;
+        cloud->inverseSurface = false;
         // Spec path is display-referred emission + optional POV IOR layer; skip volume GI refill.
         if (giWeight > 0.999)
             cloud->giWeight = 0.0;
     }
+    if (inverseSurface)
+    {
+        cloud->asSurface = true;
+        cloud->surfaceSmooth = true;
+        cloud->filterFloaters = true;
+        cloud->khrEllipse = false;
+    }
+}
+
+bool WriteMeshWavefrontObj(const Mesh *mesh, const std::string &path, Parser *parser)
+{
+    if (mesh == nullptr || mesh->Data == nullptr || path.empty())
+        return false;
+    std::ofstream out(path.c_str());
+    if (!out)
+    {
+        parser->Warning("export_mesh: could not open '%s' for writing.", path.c_str());
+        return false;
+    }
+    out << "# POV-Ray gaussian inverse_surface mesh\n";
+    out << "# triangles " << mesh->Data->Number_Of_Triangles << "\n";
+    const MeshIndex nTri = mesh->Data->Number_Of_Triangles;
+    // Unique vertices per corner (mesh stores 3 verts per tri already).
+    for (MeshIndex ti = 0; ti < nTri; ++ti)
+    {
+        const MESH_TRIANGLE &tri = mesh->Data->Triangles[ti];
+        const MeshVector &a = mesh->Data->Vertices[tri.P1];
+        const MeshVector &b = mesh->Data->Vertices[tri.P2];
+        const MeshVector &c = mesh->Data->Vertices[tri.P3];
+        out << "v " << a[X] << ' ' << a[Y] << ' ' << a[Z] << '\n';
+        out << "v " << b[X] << ' ' << b[Y] << ' ' << b[Z] << '\n';
+        out << "v " << c[X] << ' ' << c[Y] << ' ' << c[Z] << '\n';
+    }
+    for (MeshIndex ti = 0; ti < nTri; ++ti)
+    {
+        const MeshIndex base = ti * 3 + 1; // OBJ is 1-based
+        out << "f " << base << ' ' << (base + 1) << ' ' << (base + 2) << '\n';
+    }
+    out.close();
+    parser->Warning("export_mesh: wrote %d triangle(s) to '%s'.",
+                    static_cast<int>(nTri), path.c_str());
+    return true;
 }
 
 ObjectPtr MaybeConvertToSurfaceMesh(Parser *parser, ObjectPtr obj)
@@ -1051,25 +1112,44 @@ ObjectPtr MaybeConvertToSurfaceMesh(Parser *parser, ObjectPtr obj)
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr || !cloud->asSurface)
         return obj;
+    const bool inverse = cloud->inverseSurface;
+    const std::string exportPath = cloud->exportMeshPath;
     Mesh *mesh = cloud->BuildSurfaceMesh();
     if (mesh == nullptr)
-        parser->Error("as_surface: opacity voxel mesh produced no triangles (try lowering opacity / denser voxels).");
+        parser->Error("%s: opacity voxel mesh produced no triangles (try lowering opacity / denser voxels).",
+                      inverse ? "inverse_surface" : "as_surface");
 
-    // Transfer IOR/interior from the splat object (rose_ior-style) onto the mesh.
-    mesh->interior = cloud->interior;
-    mesh->Interior_Texture = cloud->Interior_Texture;
-    cloud->Interior_Texture = nullptr;
+    if (inverse)
+    {
+        // Opaque extracted surface: do not inherit glass interior / IOR.
+        mesh->interior = InteriorPtr();
+        mesh->Interior_Texture = nullptr;
+        cloud->Interior_Texture = nullptr;
+        cloud->interior = InteriorPtr();
+    }
+    else
+    {
+        // Legacy as_surface + optional rose_ior-style interior on the mesh.
+        mesh->interior = cloud->interior;
+        mesh->Interior_Texture = cloud->Interior_Texture;
+        cloud->Interior_Texture = nullptr;
+    }
 
     mesh->has_inside_vector = true;
     if (mesh->Data != nullptr)
         mesh->Data->Inside_Vect = Vector3d(0.0, 1.0, 0.0);
     Clear_Flag(mesh, HOLLOW_FLAG);
 
-    parser->Warning("as_surface: built SuperSplat-style %s mesh with %d triangle(s), %d texture(s)%s.",
+    if (!exportPath.empty())
+        WriteMeshWavefrontObj(mesh, exportPath, parser);
+
+    parser->Warning("%s: built %s mesh with %d triangle(s), %d texture(s)%s.",
+                    inverse ? "inverse_surface" : "as_surface",
                     cloud->surfaceSmooth ? "smooth-MC" : "voxel-faces",
                     static_cast<int>(mesh->Data->Number_Of_Triangles),
                     static_cast<int>(mesh->Number_Of_Textures),
-                    (mesh->interior != nullptr && mesh->interior->IOR > 1.0 + EPSILON) ? ", with interior IOR" : "");
+                    (!inverse && mesh->interior != nullptr && mesh->interior->IOR > 1.0 + EPSILON)
+                        ? ", with interior IOR" : " (opaque)");
     delete cloud;
     return reinterpret_cast<ObjectPtr>(mesh);
 }
@@ -1105,12 +1185,14 @@ ObjectPtr Parser::Parse_Assimp()
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
     bool khrEllipse = false;
+    bool inverseSurface = false;
+    std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse);
+                               khrEllipse, inverseSurface, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1119,10 +1201,10 @@ ObjectPtr Parser::Parse_Assimp()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse);
-    // For as_surface: parse texture/interior onto the cloud first so SH colours can
-    // pick up the rose_ior-style finish and the mesh inherits interior IOR.
-    if (asSurface)
+                              khrEllipse, inverseSurface, exportMeshPath);
+    // For as_surface / inverse_surface: parse texture/interior onto the cloud first so
+    // SH colours can pick up finish; inverse_surface then strips IOR on convert.
+    if (asSurface || inverseSurface)
     {
         result = Parse_Object_Mods(result);
         result = MaybeConvertToSurfaceMesh(this, result);
@@ -1164,12 +1246,14 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
     bool khrEllipse = false;
+    bool inverseSurface = false;
+    std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse);
+                               khrEllipse, inverseSurface, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1178,10 +1262,9 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse);
-    // For as_surface: parse texture/interior onto the cloud first so SH colours can
-    // pick up the rose_ior-style finish and the mesh inherits interior IOR.
-    if (asSurface)
+                              khrEllipse, inverseSurface, exportMeshPath);
+    // For as_surface / inverse_surface: parse mods onto cloud first, then convert.
+    if (asSurface || inverseSurface)
     {
         result = Parse_Object_Mods(result);
         result = MaybeConvertToSurfaceMesh(this, result);

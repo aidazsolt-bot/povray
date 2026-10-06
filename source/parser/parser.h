@@ -795,7 +795,7 @@ class Parser final
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
-                                        bool &khrEllipse);
+                                        bool &khrEllipse, bool &inverseSurface, std::string &exportMeshPath);
 #endif
         void Parse_Mesh1 (Mesh*);
         void Parse_Mesh2 (Mesh*);

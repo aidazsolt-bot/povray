@@ -918,6 +918,8 @@ ObjectPtr Parser::Parse_Ply()
     int maxHits = 0;
     DBL giWeight = 1.0;
     bool khrEllipse = false;
+    bool inverseSurface = false;
+    std::string exportMeshPath;
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
     bool asSurface = false;
     bool surfaceSmooth = false;
@@ -932,7 +934,7 @@ ObjectPtr Parser::Parse_Ply()
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse);
+                               khrEllipse, inverseSurface, exportMeshPath);
 #else
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -981,12 +983,21 @@ ObjectPtr Parser::Parse_Ply()
             cloud->maxHits = maxHits;
             cloud->giWeight = giWeight;
             cloud->khrEllipse = khrEllipse;
+            cloud->inverseSurface = inverseSurface;
+            cloud->exportMeshPath = exportMeshPath;
             if (khrEllipse)
             {
                 cloud->samples = 2;
                 cloud->cullSingletonHits = false;
                 if (giWeight > 0.999)
                     cloud->giWeight = 0.0;
+            }
+            if (inverseSurface)
+            {
+                cloud->asSurface = true;
+                cloud->surfaceSmooth = true;
+                cloud->filterFloaters = true;
+                cloud->khrEllipse = false;
             }
         }
     }

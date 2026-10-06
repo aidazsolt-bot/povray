@@ -67,7 +67,8 @@ void QuatToR(DBL w, DBL x, DBL y, DBL z, MATRIX R)
     R[2][2] = 1 - 2 * (x * x + y * y);
 }
 
-TEXTURE *MakeSurfaceTriTexture(DBL r, DBL g, DBL b, DBL localOpacity, const FINISH *srcFinish, bool iorMode)
+TEXTURE *MakeSurfaceTriTexture(DBL r, DBL g, DBL b, DBL localOpacity, const FINISH *srcFinish,
+                               bool iorMode, bool inverseMode)
 {
     TEXTURE *tex = Create_Texture();
     Destroy_Pigment(tex->Pigment);
@@ -76,10 +77,47 @@ TEXTURE *MakeSurfaceTriTexture(DBL r, DBL g, DBL b, DBL localOpacity, const FINI
         tex->Finish = Create_Finish();
 
     const DBL opac = Clamp01Local(localOpacity);
-    // Denser splat neighbourhood -> less transmit (more body); sparse -> more glass-like.
-    const DBL transmit = iorMode ? Clamp01Local(1.0 - opac * 0.85) : 0.0;
+    // Inverse surface: always opaque. IOR mode: density-weighted transmit.
+    const DBL transmit = (inverseMode || !iorMode) ? 0.0 : Clamp01Local(1.0 - opac * 0.85);
     RGBColour rgb(Clamp01Local(r), Clamp01Local(g), Clamp01Local(b));
     tex->Pigment->colour = TransColour(pov_base::ToMathColour(rgb), 0.0, transmit);
+
+    if (inverseMode)
+    {
+        // Opaque extracted surface: SH as diffuse albedo + mild specular (no glass).
+        if (srcFinish != nullptr)
+        {
+            const FINISH *src = srcFinish;
+            tex->Finish->Diffuse = src->Diffuse > EPSILON ? src->Diffuse : 0.85f;
+            tex->Finish->DiffuseBack = src->DiffuseBack;
+            tex->Finish->Brilliance = src->Brilliance;
+            tex->Finish->Specular = src->Specular;
+            tex->Finish->Roughness = src->Roughness;
+            tex->Finish->Phong = src->Phong;
+            tex->Finish->Phong_Size = src->Phong_Size;
+            tex->Finish->Ambient = src->Ambient;
+            tex->Finish->Emission = src->Emission;
+            tex->Finish->Reflection_Max = src->Reflection_Max;
+            tex->Finish->Reflection_Min = src->Reflection_Min;
+            tex->Finish->Reflection_Falloff = src->Reflection_Falloff;
+            tex->Finish->Reflection_Fresnel = src->Reflection_Fresnel;
+            tex->Finish->Fresnel = src->Fresnel;
+            tex->Finish->Metallic = src->Metallic;
+            tex->Finish->Conserve_Energy = src->Conserve_Energy;
+        }
+        else
+        {
+            tex->Finish->Ambient = MathColour(0.05);
+            tex->Finish->Diffuse = 0.85f;
+            tex->Finish->Specular = 0.15f;
+            tex->Finish->Roughness = 0.08f;
+            tex->Finish->Emission = MathColour(0.0);
+            tex->Finish->Reflection_Max = MathColour(0.0);
+            tex->Finish->Reflection_Min = MathColour(0.0);
+        }
+        Post_Textures(tex);
+        return tex;
+    }
 
     if (srcFinish != nullptr)
     {
@@ -459,7 +497,7 @@ void EmitSmoothMC(const std::vector<uint8_t>& solid, const GridSpec& grid,
             }
 }
 
-Mesh *BuildMeshFromTris(std::vector<TriRec>& tris, const FINISH *srcFinish, bool iorMode)
+Mesh *BuildMeshFromTris(std::vector<TriRec>& tris, const FINISH *srcFinish, bool iorMode, bool inverseMode)
 {
     if (tris.empty())
         return nullptr;
@@ -475,7 +513,7 @@ Mesh *BuildMeshFromTris(std::vector<TriRec>& tris, const FINISH *srcFinish, bool
         if (it != texOfColour.end())
             return it->second;
         const MeshIndex id = static_cast<MeshIndex>(textures.size());
-        textures.push_back(MakeSurfaceTriTexture(r, g, b, opac, srcFinish, iorMode));
+        textures.push_back(MakeSurfaceTriTexture(r, g, b, opac, srcFinish, iorMode, inverseMode));
         texOfColour[key] = id;
         return id;
     };
@@ -623,10 +661,13 @@ Mesh *GaussianSplatCloud::BuildSurfaceMesh() const
         EmitFaces(solid, grid, this, keep, tris);
 
     const FINISH *srcFinish = (Texture != nullptr) ? Texture->Finish : nullptr;
-    const bool iorMode = (interior != nullptr && interior->IOR > SNGL(1.0) + EPSILON) ||
-                         (srcFinish != nullptr && (srcFinish->Specular > EPSILON || srcFinish->Reflection_Fresnel ||
-                                                   srcFinish->Fresnel > EPSILON));
-    return BuildMeshFromTris(tris, srcFinish, iorMode);
+    // inverse_surface: always opaque mesh (ignore interior IOR / glass finish heuristics).
+    const bool inverseMode = inverseSurface;
+    const bool iorMode = !inverseMode &&
+                         ((interior != nullptr && interior->IOR > SNGL(1.0) + EPSILON) ||
+                          (srcFinish != nullptr && (srcFinish->Specular > EPSILON || srcFinish->Reflection_Fresnel ||
+                                                    srcFinish->Fresnel > EPSILON)));
+    return BuildMeshFromTris(tris, srcFinish, iorMode, inverseMode);
 }
 
 } // namespace pov
