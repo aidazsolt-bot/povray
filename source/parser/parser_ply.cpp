@@ -917,6 +917,7 @@ ObjectPtr Parser::Parse_Ply()
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
+    bool khrEllipse = false;
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
     bool asSurface = false;
     bool surfaceSmooth = false;
@@ -930,7 +931,8 @@ ObjectPtr Parser::Parse_Ply()
                                opacityCutoff, alphaStop, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
-                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
+                               khrEllipse);
 #else
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -978,6 +980,14 @@ ObjectPtr Parser::Parse_Ply()
             cloud->samples = samples;
             cloud->maxHits = maxHits;
             cloud->giWeight = giWeight;
+            cloud->khrEllipse = khrEllipse;
+            if (khrEllipse)
+            {
+                cloud->samples = 2;
+                cloud->cullSingletonHits = false;
+                if (giWeight > 0.999)
+                    cloud->giWeight = 0.0;
+            }
         }
     }
     else

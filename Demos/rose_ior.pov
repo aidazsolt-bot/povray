@@ -1,5 +1,5 @@
-// Veiled-baseline Gaussians + material/IOR experiment
-// Experiment: splat pigment + glass-ish finish + interior IOR (refraction).
+// KHR_gaussian_splatting ellipse kernel (projected 2D EWA) + POV IOR material layer.
+// Spec math on primary; finish/interior is relighting (not part of KHR).
 #version 3.8;
 global_settings { assumed_gamma 1.0 }
 
@@ -23,11 +23,8 @@ plane {
 
 gaussian_splat {
   "models/Rose.ply"
+  khr_ellipse
   sh_degree 3
-  samples 2
-  alpha_stop 0.75
-  opacity_cutoff 0.0039
-  gi_weight 0
   texture {
     pigment { color rgb 1 }
     finish {

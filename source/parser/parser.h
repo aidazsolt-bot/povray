@@ -794,7 +794,8 @@ class Parser final
                                         DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
-                                        DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity);
+                                        DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
+                                        bool &khrEllipse);
 #endif
         void Parse_Mesh1 (Mesh*);
         void Parse_Mesh2 (Mesh*);

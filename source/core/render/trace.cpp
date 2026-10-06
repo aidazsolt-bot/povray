@@ -2818,11 +2818,12 @@ void Trace::IntegrateGaussianSplatVolumes(const Ray& ray, const Intersection& be
 
         const DBL localT1 = t1 * lenScale;
         GaussianSplatSegmentResult seg;
-        const bool useKerbl = ray.IsPrimaryRay() && threadData != nullptr &&
+        const bool useKerbl = ray.IsPrimaryRay() && !cloud->khrEllipse &&
+                              threadData != nullptr &&
                               threadData->GaussianSplatCam.camValid &&
                               threadData->GaussianSplatCam.pixelValid;
         // Veiled-baseline: keep volume IntegrateAlongRay even for samples==2
-        // (later branches skip this to avoid fog outside the subject).
+        // (khrEllipse skips volume GI by default giWeight=0; if enabled, billboard only).
         if (!cloud->IntegrateAlongRay(localRay.Origin, localRay.Direction, EPSILON, localT1,
                                        -localRay.Direction, seg, threadData, useKerbl))
             continue;

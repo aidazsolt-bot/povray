@@ -313,6 +313,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { JPEG_TOKEN,                   "jpeg" },
     { JULIA_TOKEN,                  "julia" },
     { JULIA_FRACTAL_TOKEN,          "julia_fractal" },
+    { KHR_ELLIPSE_TOKEN,            "khr_ellipse" },
 
     { LAMBDA_TOKEN,                 "lambda" },
     { LATHE_TOKEN,                  "lathe" },

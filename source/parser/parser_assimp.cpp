@@ -931,7 +931,8 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
                                         DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
-                                        DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity)
+                                        DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
+                                        bool &khrEllipse)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -944,6 +945,14 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
         END_CASE
         CASE (APPROXIMATE_TOKEN)
             approximate = true;
+        END_CASE
+        CASE (KHR_ELLIPSE_TOKEN)
+            // KHR_gaussian_splatting ellipse kernel: projected 2D EWA + IOR material layer.
+            khrEllipse = true;
+            samples = 2;
+            opacityCutoff = 1.0 / 255.0;
+            alphaStop = 0.999;
+            asSurface = false;
         END_CASE
         CASE (AS_SURFACE_TOKEN)
             asSurface = true;
@@ -1006,7 +1015,8 @@ namespace
 void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, int samples, int maxHits, DBL giWeight,
                                bool asSurface, bool surfaceSmooth, bool filterFloaters,
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
-                               DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity)
+                               DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity,
+                               bool khrEllipse)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
@@ -1024,6 +1034,16 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
     cloud->floaterVoxelSize = floaterVoxelSize;
     cloud->floaterVoxelOpacity = floaterVoxelOpacity;
     cloud->floaterMinOpacity = floaterMinOpacity;
+    cloud->khrEllipse = khrEllipse;
+    if (khrEllipse)
+    {
+        cloud->samples = 2;
+        cloud->cullSingletonHits = false;
+        cloud->asSurface = false;
+        // Spec path is display-referred emission + optional POV IOR layer; skip volume GI refill.
+        if (giWeight > 0.999)
+            cloud->giWeight = 0.0;
+    }
 }
 
 ObjectPtr MaybeConvertToSurfaceMesh(Parser *parser, ObjectPtr obj)
@@ -1084,11 +1104,13 @@ ObjectPtr Parser::Parse_Assimp()
     DBL floaterVoxelSize = 0.05;
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
+    bool khrEllipse = false;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
-                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
+                               khrEllipse);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1096,7 +1118,8 @@ ObjectPtr Parser::Parse_Assimp()
     ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
-                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
+                              khrEllipse);
     // For as_surface: parse texture/interior onto the cloud first so SH colours can
     // pick up the rose_ior-style finish and the mesh inherits interior IOR.
     if (asSurface)
@@ -1140,11 +1163,13 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     DBL floaterVoxelSize = 0.05;
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
+    bool khrEllipse = false;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
-                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
+                               khrEllipse);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1152,7 +1177,8 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
-                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity);
+                              floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
+                              khrEllipse);
     // For as_surface: parse texture/interior onto the cloud first so SH colours can
     // pick up the rose_ior-style finish and the mesh inherits interior IOR.
     if (asSurface)

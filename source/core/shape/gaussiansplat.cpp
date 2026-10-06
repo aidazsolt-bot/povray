@@ -2,11 +2,14 @@
 ///
 /// @file core/shape/gaussiansplat.cpp
 ///
-/// Experimental 3D Gaussian Splatting cloud: samples==2 uses SuperSplat-style
-/// project / tile / depth-sort / 2D EWA blend (CPU). This branch restores the
-/// "veiled" baseline (channel-major SH + project path, before floater culls /
-/// normExp / volume-skip hardening). samples<=1 peak and samples>=3 Vol3DGS
-/// remain along-ray (GI / hybrid).
+/// Experimental 3D Gaussian Splatting cloud.
+///
+/// samples==2: SuperSplat/Kerbl project / tile / depth-sort / 2D EWA (CPU).
+/// khrEllipse: KHR_gaussian_splatting ellipse fidelity on that path
+///   (cameraDistance sort, 3-sigma, float blend, M * Sigma * M^T, no volume
+///   refill on primary miss; secondary = ray-plane billboard). POV finish /
+///   interior IOR is a separate material/relighting layer on the composite hit.
+/// samples<=1 peak and samples>=3 Vol3DGS remain along-ray (GI / hybrid).
 ///
 //******************************************************************************
 
@@ -56,12 +59,14 @@ const DBL kWeightEps = 1.0e-4;
 const int kDefaultMaxHits = 65536;
 const int kHardMaxHits = 262144;
 const DBL kExtentSigma = 3.0;
-/// SuperSplat quad edge at UV=1 ⇒ mahalanobis² = 8 (2√2 σ); soft cull only.
-const DBL kProjPowerCull = 8.0;
+/// SuperSplat quad edge at UV=1 => mahalanobis^2 = 8 (2*sqrt(2) sigma); soft cull only.
+const DBL kProjPowerCullSuperSplat = 8.0;
+/// KHR ellipse kernel: 3-sigma cutoff => mahalanobis^2 <= 9.
+const DBL kProjPowerCullKhr = 9.0;
 const int kProjTileSize = 16;
 /// Veiled-baseline: no min/max pixel / floater culls (those came after the
 /// "verschleiert" feedback). Extent still used for tile coverage.
-const DBL kSqrtTwoPi = 2.5066282746310002; // √(2π)
+const DBL kSqrtTwoPi = 2.5066282746310002; // sqrt(2*pi)
 
 inline DBL Clamp01(DBL v)
 {
@@ -102,6 +107,62 @@ void QuatToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
     out[2][0] = 2 * (x * z - y * w);
     out[2][1] = 2 * (y * z + x * w);
     out[2][2] = 1 - 2 * (x * x + y * y);
+}
+
+/// Build Sigma = R * diag(s^2) * R^T in object space (KHR C C^T with C = R S).
+void BuildSigmaObject(const GaussianSplatPoint& sp, DBL Sigma[3][3])
+{
+    MATRIX Rmat;
+    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
+    const DBL sx = std::max(sp.scale[X], EPSILON);
+    const DBL sy = std::max(sp.scale[Y], EPSILON);
+    const DBL sz = std::max(sp.scale[Z], EPSILON);
+    const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            Sigma[i][j] = Rmat[i][0] * s2x * Rmat[j][0]
+                        + Rmat[i][1] * s2y * Rmat[j][1]
+                        + Rmat[i][2] * s2z * Rmat[j][2];
+        }
+    }
+}
+
+/// Sigma_world = M * Sigma * M^T using the same linear map as MTransDirection
+/// (KHR Sigma = M C C^T M^T with M = node upper-left 3x3).
+void TransformCovariance(DBL Sigma[3][3], const TRANSFORM *Trans)
+{
+    if (Trans == nullptr)
+        return;
+
+    // M3[i][j]: (M v)[i] = sum_j M3[i][j] v[j]  (matches MTransDirection).
+    DBL M3[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            M3[i][j] = Trans->matrix[j][i];
+
+    DBL tmp[3][3];
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            DBL s = 0.0;
+            for (int k = 0; k < 3; ++k)
+                s += Sigma[i][k] * M3[j][k]; // Sigma * M^T
+            tmp[i][j] = s;
+        }
+    }
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            DBL s = 0.0;
+            for (int k = 0; k < 3; ++k)
+                s += M3[i][k] * tmp[k][j]; // M * tmp
+            Sigma[i][j] = s;
+        }
+    }
 }
 
 void SplatWorldAABB(const GaussianSplatPoint& sp, Vector3d& bmin, Vector3d& bmax)
@@ -153,6 +214,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     opacityScale(1.0),
     materialShading(false),
     cullSingletonHits(true),
+    khrEllipse(false),
     asSurface(false),
     surfaceSmooth(false),
     filterFloaters(true),
@@ -191,6 +253,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->opacityScale = opacityScale;
     New->materialShading = materialShading;
     New->cullSingletonHits = cullSingletonHits;
+    New->khrEllipse = khrEllipse;
     New->asSurface = asSurface;
     New->surfaceSmooth = surfaceSmooth;
     New->filterFloaters = filterFloaters;
@@ -446,10 +509,11 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
     }
 
     // --- samples == 2: Kerbl Jacobian EWA (primary) or plane-perp billboard fallback ---
+    // khrEllipse secondary: never use primary-camera J (caller forces useKerbl=false).
     if (samples == 2)
     {
         const TraceThreadData::GaussianSplatProj *proj =
-            (useKerbl && Thread != nullptr && Thread->GaussianSplatCam.camValid &&
+            (useKerbl && !khrEllipse && Thread != nullptr && Thread->GaussianSplatCam.camValid &&
              Thread->GaussianSplatCam.pixelValid) ? &Thread->GaussianSplatCam : nullptr;
 
         if (proj != nullptr)
@@ -517,14 +581,15 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             const DBL du = proj->screenU - meanU;
             const DBL dv = proj->screenV - meanV;
             const DBL power = (cov11 * du * du - 2.0 * cov01 * du * dv + cov00 * dv * dv) / det;
-            if (power > (kExtentSigma * kExtentSigma))
+            const DBL powerCull = khrEllipse ? kProjPowerCullKhr : (kExtentSigma * kExtentSigma);
+            if (power > powerCull)
                 return false;
 
             weight = Clamp01(opac * std::exp(-0.5 * power));
             return weight >= opacityCutoff;
         }
 
-        // Billboard fallback: Σ projected into plane ⟂ ray (no perspective J).
+        // Billboard fallback (KHR secondary policy): Σ projected into plane ⟂ ray (no perspective J).
         const Vector3d om = sp.position - origin;
         tHit = dot(om, dir);
         if (tHit < tSeg0 || tHit > tSeg1)
@@ -563,7 +628,8 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
         const DBL du = dot(delta, u);
         const DBL dv = dot(delta, v);
         const DBL power = (a11 * du * du - 2.0 * a01 * du * dv + a00 * dv * dv) / det;
-        if (power > (kExtentSigma * kExtentSigma))
+        const DBL powerCull = khrEllipse ? kProjPowerCullKhr : (kExtentSigma * kExtentSigma);
+        if (power > powerCull)
             return false;
 
         weight = Clamp01(opac * std::exp(-0.5 * power));
@@ -896,24 +962,12 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         if (tz <= EPSILON)
             continue;
 
-        MATRIX Rmat;
-        QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
-        const DBL sx = std::max(sp.scale[X], EPSILON);
-        const DBL sy = std::max(sp.scale[Y], EPSILON);
-        const DBL sz = std::max(sp.scale[Z], EPSILON);
-
-        // Σ_world = R S² Rᵀ
         DBL SigmaW[3][3];
-        {
-            const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
-            for (int i = 0; i < 3; ++i)
-                for (int j = 0; j < 3; ++j)
-                    SigmaW[i][j] = Rmat[i][0] * s2x * Rmat[j][0]
-                                 + Rmat[i][1] * s2y * Rmat[j][1]
-                                 + Rmat[i][2] * s2z * Rmat[j][2];
-        }
+        BuildSigmaObject(sp, SigmaW);
+        // KHR: Sigma = M C C^T M^T (also required whenever Trans rotates/scales).
+        TransformCovariance(SigmaW, Trans);
 
-        // Σ_cam = W Σ_world Wᵀ  (rows of W = camera axes)
+        // Sigma_cam = W Sigma_world W^T  (rows of W = camera axes)
         const Vector3d axes[3] = { cam.right, cam.up, cam.forward };
         DBL SigmaC[3][3];
         for (int i = 0; i < 3; ++i)
@@ -966,7 +1020,9 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         Vector3d camToSplat = rel;
         camToSplat.normalize();
         EvalColour(sp, camToSplat, rgb);
-        rgb = TonemapSplatRgb(rgb);
+        // KHR: blend in float, tonemap/clamp after composition. Legacy path tonemaps early.
+        if (!khrEllipse)
+            rgb = TonemapSplatRgb(rgb);
 
         ProjEntry e;
         e.meanU = meanU;
@@ -975,6 +1031,7 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         e.cov01 = cov01;
         e.cov11 = cov11;
         e.depth = tz;
+        e.camDist = rel.length(); // KHR sortingMethod cameraDistance
         e.alpha = opac;
         e.r = rgb[X];
         e.g = rgb[Y];
@@ -1078,14 +1135,15 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         if (det <= EPSILON)
             continue;
         const DBL power = (e.cov11 * du * du - 2.0 * e.cov01 * du * dv + e.cov00 * dv * dv) / det;
-        if (power > kProjPowerCull)
+        const DBL powerCull = khrEllipse ? kProjPowerCullKhr : kProjPowerCullSuperSplat;
+        if (power > powerCull)
             continue;
         const DBL g = GaussPower(power);
         const DBL alpha = Clamp01(e.alpha * g);
         if (alpha < opacityCutoff)
             continue;
         TraceThreadData::GaussianSplatHitRec rec;
-        rec.t = e.depth;
+        rec.t = khrEllipse ? e.camDist : e.depth;
         rec.w = alpha;
         rec.idx = ei; // index into projCache.entries (colour baked in)
         hits.push_back(rec);
@@ -1095,6 +1153,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         return false;
 
     // Singleton view-ray cull: one splat alone is usually a soft edge / floater.
+    // Disabled under khrEllipse (spec has no singleton cull).
     if (cullSingletonHits && hits.size() < 2)
         return false;
 
@@ -1114,7 +1173,8 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         const Vector3d rgb(e.r, e.g, e.b);
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
-        depthSum += hits[i].t * contrib;
+        // Hit placement still uses view-forward depth (tz), even when sort key is camDist.
+        depthSum += e.depth * contrib;
         depthW += contrib;
         T *= (1.0 - alpha);
     }
@@ -1156,10 +1216,9 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     const bool primaryProj = ray.IsPrimaryRay() && Thread != nullptr &&
                              Thread->GaussianSplatCam.camValid && Thread->GaussianSplatCam.pixelValid;
 
-    // samples == 2: project/sort/blend when it hits; otherwise fall through to
-    // 3D BVH IntegrateAlongRay (veiled-baseline behaviour — volume can refill
-    // soft floaters outside the projected subject).
-    if (samples == 2 && primaryProj)
+    // samples == 2 / khrEllipse: project/sort/blend when it hits.
+    // khrEllipse: no volume IntegrateAlongRay refill (would break KHR silhouette).
+    if ((samples == 2 || khrEllipse) && primaryProj)
     {
         GaussianSplatCamBasis cam;
         cam.origin = Thread->GaussianSplatCam.origin;
@@ -1202,9 +1261,12 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
             Depth_Stack->push(isect);
             return true;
         }
+        if (khrEllipse)
+            return false; // Spec miss: do not refill with 3D volume alpha.
     }
 
-    const bool useKerbl = primaryProj;
+    // Secondary / non-projected: khrEllipse uses ray-plane billboard only (no primary J).
+    const bool useKerbl = primaryProj && !khrEllipse;
     if (!IntegrateAlongRay(origin, dir, kDepthTolerance, BOUND_HUGE, viewDir, seg, Thread, useKerbl))
         return false;
 

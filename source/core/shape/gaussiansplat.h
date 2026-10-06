@@ -4,9 +4,11 @@
 ///
 /// Declarations for an experimental 3D Gaussian Splatting cloud primitive.
 ///
-/// Stores packed Inria/graphdeco-style Gaussians. Primary path for samples==2:
-/// SuperSplat/Kerbl project → tile → depth-sort → 2D EWA blend (CPU). Also
-/// supports peak (1) / volume (>=3) along-ray integration for GI/hybrid.
+/// Stores packed Inria/graphdeco-style Gaussians. Primary path for samples==2
+/// or khrEllipse: Kerbl/KHR project → tile → cameraDistance-sort → 2D EWA blend.
+/// khrEllipse tightens fidelity to KHR_gaussian_splatting (ellipse kernel) while
+/// POV finish/interior IOR remains a separate material/relighting layer.
+/// Also supports peak (1) / volume (>=3) along-ray integration for GI/hybrid.
 ///
 //******************************************************************************
 
@@ -88,6 +90,11 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Drop view rays / pixels that collect only one contributing splat
         /// (typical soft edge / floater fringe). Off = legacy compositing.
         bool cullSingletonHits;
+        /// KHR_gaussian_splatting ellipse kernel fidelity:
+        /// samples=2 projected path, cameraDistance sort, 3-sigma cutoff,
+        /// float blend before tonemap, Sigma transformed by node M, no volume
+        /// refill on primary miss, secondary = ray-plane billboard (not primary J).
+        bool khrEllipse;
         /// SuperSplat-style opacity voxel surface (as_surface): replace cloud with Mesh.
         bool asSurface;
         bool surfaceSmooth;       ///< true = marching cubes; false = voxel faces (default).
@@ -107,9 +114,10 @@ class GaussianSplatCloud final : public NonsolidObject
         {
             DBL meanU, meanV;
             DBL cov00, cov01, cov11;
-            DBL depth;   ///< View depth along camera forward.
-            DBL alpha;   ///< Sigmoid opacity (scaled).
-            DBL r, g, b; ///< View-dependent SH colour for this camera.
+            DBL depth;    ///< View depth along camera forward (ray hit placement).
+            DBL camDist;  ///< ||mu - cam|| for KHR cameraDistance sort.
+            DBL alpha;    ///< Linear opacity attribute (scaled).
+            DBL r, g, b;  ///< View-dependent SH colour for this camera (pre-tonemap).
         };
 
         /// Frame cache: project all splats once, bin into screen tiles (CSR).
