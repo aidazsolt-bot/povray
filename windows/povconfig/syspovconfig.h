@@ -42,11 +42,13 @@
 #define POVRAY_WINDOWS_SYSPOVCONFIG_H
 
 #ifdef BUILDING_AMD64
-  #if !defined(_M_AMD64) && !defined(_M_X64)
+  #if !defined(_M_AMD64) && !defined(_M_X64) && !defined(__x86_64__) && !defined(__amd64__)
     #error "you are compiling the x64 project using a 32-bit compiler"
   #endif
 #else
-  #if defined(_M_AMD64) || defined(_M_X64)
+  // MSVC uses separate 32/64 project configs via BUILDING_AMD64.
+  // MinGW-w64 follows the compiler's native arch (__x86_64__/__i386__) instead.
+  #if !defined(__MINGW32__) && (defined(_M_AMD64) || defined(_M_X64))
     #error "you are compiling the 32-bit project using a 64-bit compiler"
   #endif
 #endif
@@ -77,8 +79,7 @@
 
 #define ReturnAddress()           NULL
 
-#if defined(__MINGW32__)                    /* MinGW GCC */
-  #error "Currently not supported."
+#if defined(__MINGW32__)                    /* MinGW / MinGW-w64 GCC */
   #include "syspovconfig_mingw32.h"
 #elif defined(__WATCOMC__)                  /* Watcom C/C++ C32 */
   #error "Currently not supported."
@@ -140,9 +141,23 @@ namespace povwin
 
 #ifndef _WIN64
   // TODO FIXME - The following will obviously only work on x86 machines.
-  inline void DebugBreak() { _asm _emit 0cch } // rather than use the windows one
-  inline POV_LONG RDTSC(){ _asm _emit 0Fh _asm _emit 31h }
-  #define READ_PROFILE_TIMER RDTSC()
+  #if defined(_MSC_VER)
+    inline void DebugBreak() { _asm _emit 0cch } // rather than use the windows one
+    inline POV_LONG RDTSC(){ _asm _emit 0Fh _asm _emit 31h }
+    #define READ_PROFILE_TIMER RDTSC()
+  #elif defined(__GNUC__)
+    inline void DebugBreak() { __asm__ __volatile__("int $3"); }
+    inline POV_LONG RDTSC()
+    {
+      unsigned int lo, hi;
+      __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+      return (POV_LONG)(((unsigned long long)hi << 32) | lo);
+    }
+    #define READ_PROFILE_TIMER RDTSC()
+  #else
+    inline void DebugBreak() {}
+    #define READ_PROFILE_TIMER 0
+  #endif
 #else
   inline void DebugBreak() {}
   #define READ_PROFILE_TIMER 0
