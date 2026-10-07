@@ -123,6 +123,10 @@
     // in creating an entire new classification for it right now.
     #include <boost/version.hpp>
 
+#if defined(POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT) && POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+    #include <assimp/version.h>
+#endif
+
 #endif
 
 // this must be the last file included
@@ -476,6 +480,26 @@ void BuildInitInfo(POVMSObjectPtr msg)
                 err = POVMSAttr_Delete(&attr);
         }
     }
+
+#if defined(POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT) && POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+    // Assimp library version and copyright notice (mesh / Gaussian splat import)
+    if(err == kNoErr)
+    {
+        err = POVMSAttr_New(&attr);
+        if(err == kNoErr)
+        {
+            const char *tempstr = pov_tsprintf(
+                "Assimp %u.%u.%u, Copyright (c) 2006-2026 assimp team, https://www.assimp.org/",
+                aiGetVersionMajor(), aiGetVersionMinor(), aiGetVersionPatch());
+
+            err = POVMSAttr_Set(&attr, kPOVMSType_CString, reinterpret_cast<const void *>(tempstr), (int) strlen(tempstr) + 1);
+            if(err == kNoErr)
+                err = POVMSAttrList_Append(&attrlist, &attr);
+            else
+                err = POVMSAttr_Delete(&attr);
+        }
+    }
+#endif
 
 #ifndef OPENEXR_MISSING
     // OpenEXR and related libraries version and copyright notice
