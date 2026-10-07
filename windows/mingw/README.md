@@ -34,6 +34,10 @@ Output:
 - `$MINGW_OUT/povray.exe` (default: `windows/mingw/out/povray.exe`)
 - Build log: `$MINGW_OUT/build.log`
 
+The link step uses `-static-libgcc -static-libstdc++` and a static
+`libwinpthread`, so a normal Windows 64-bit machine does **not** need
+MinGW DLLs next to the exe. Copy only `povray.exe`.
+
 `BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
 
 ## Features in this build

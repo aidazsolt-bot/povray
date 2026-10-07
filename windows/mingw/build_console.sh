@@ -198,9 +198,15 @@ fi
 
 mapfile -t OBJS < <(find "$OBJ" -name '*.o' | sort)
 echo "Linking ${#OBJS[@]} objects -> $OUT/povray.exe" | tee -a "$LOG"
-"$CXX" -O2 -pthread -o "$OUT/povray.exe" "${OBJS[@]}" -lwinpthread -lws2_32 -lstdc++fs 2>>"$LOG" || {
+# Static libgcc/libstdc++/winpthread so the .exe runs on plain Windows without
+# shipping MinGW runtime DLLs (libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-1.dll).
+# --whole-archive is required; plain -Bstatic -lwinpthread still leaves a DLL import.
+LINK_COMMON=(-O2 -pthread -static-libgcc -static-libstdc++
+  -Wl,-Bstatic -Wl,--whole-archive -lwinpthread -Wl,--no-whole-archive
+  -Wl,-Bdynamic -lws2_32)
+"$CXX" "${LINK_COMMON[@]}" -o "$OUT/povray.exe" "${OBJS[@]}" -lstdc++fs 2>>"$LOG" || {
   # retry without libstdc++fs (may be header-only in newer libstdc++)
-  "$CXX" -O2 -pthread -o "$OUT/povray.exe" "${OBJS[@]}" -lwinpthread -lws2_32 2>>"$LOG"
+  "$CXX" "${LINK_COMMON[@]}" -o "$OUT/povray.exe" "${OBJS[@]}" 2>>"$LOG"
 }
 
 file "$OUT/povray.exe" | tee -a "$LOG"
