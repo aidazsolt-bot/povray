@@ -77,6 +77,9 @@ XP or later, both 32 and 64-bit - be sure to see [windows/README.md](windows/REA
 otherwise your build _will not work_), and also on Mac systems (console mode only, using
 an appropriately-modified version of the unix build - not currently provided by us).
 
+An experimental MinGW-w64 **Windows console** cross-build (no POVWIN GUI) is documented in
+[windows/mingw/README.md](windows/mingw/README.md).
+
 If you are using an operating system with a package or ports system such as
 Ubuntu or FreeBSD, you may like to check whether or not POV-Ray is available
 via that route.

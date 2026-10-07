@@ -296,6 +296,25 @@ likely that you will need to change the code that calls the RTL from
 within POV-Ray as well, unless you are using the Microsoft RTL (or a
 compatible one).
 
+### MinGW-w64 (experimental console)
+
+An experimental **console-only** MinGW-w64 build (cross or native) is
+maintained under `windows/mingw/`:
+
+- Config: `windows/povconfig/syspovconfig_mingw32.h` (enabled from
+  `syspovconfig.h` when `__MINGW32__` is defined).
+- Build script: `windows/mingw/build_console.sh`
+- Docs / feature matrix: `windows/mingw/README.md`
+
+This path produces `povray.exe` with PNG/JPEG/TIFF and AVX noise
+dispatch. It does **not** build the POVWIN GUI (no `POVWINStartup`
+custom entry) and currently omits OpenEXR. Prefer Visual Studio for
+the full Windows IDE binary.
+
+Older Borland / Watcom / pre-3.7 MinGW support headers were removed in
+2013 as unused since 3.6; the MinGW-w64 header above is a fresh
+replacement for the console toolchain only.
+
 Custom Entry Point
 ------------------
 

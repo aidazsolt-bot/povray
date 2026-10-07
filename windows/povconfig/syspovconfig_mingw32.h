@@ -91,8 +91,9 @@
 
 #define MACHINE_INTRINSICS_H                <x86intrin.h>
 
-// Enable the same optimized-noise feature gates as recent MSVC builds when
-// the machine supports them; actual object selection remains build-flag driven.
+// Same optimized-noise feature gates as recent MSVC builds. Individual TUs are
+// compiled with -mavx / -mavx2 -mfma / -mfma4 in windows/mingw/build_console.sh;
+// runtime dispatch via CPUID still selects a safe implementation.
 #define TRY_OPTIMIZED_NOISE
 #define TRY_OPTIMIZED_NOISE_AVX_PORTABLE
 #define TRY_OPTIMIZED_NOISE_AVX

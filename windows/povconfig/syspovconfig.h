@@ -81,6 +81,16 @@
 
 #if defined(__MINGW32__)                    /* MinGW / MinGW-w64 GCC */
   #include "syspovconfig_mingw32.h"
+  // Match historic Windows config convenience typedefs used throughout the tree.
+  #ifndef STD_TYPES_DECLARED
+  #define STD_TYPES_DECLARED
+  #include <string>
+  #include <vector>
+  #include <list>
+  using std::string;
+  using std::vector;
+  using std::list;
+  #endif
 #elif defined(__WATCOMC__)                  /* Watcom C/C++ C32 */
   #error "Currently not supported."
   #include "syspovconfig_watcom.h"
@@ -243,8 +253,14 @@ namespace pov
 
 #define HAVE_NAN
 #define HAVE_INF
-#define POV_ISNAN(x)    (_isnan(x) != 0)
-#define POV_ISFINITE(x) (_finite(x) != 0)
+#if defined(__MINGW32__)
+  // MinGW-w64 provides C99/C++11 classification in <cmath>; MSVC uses _isnan/_finite.
+  #define POV_ISNAN(x)    (std::isnan(x) != 0)
+  #define POV_ISFINITE(x) (std::isfinite(x) != 0)
+#else
+  #define POV_ISNAN(x)    (_isnan(x) != 0)
+  #define POV_ISFINITE(x) (_finite(x) != 0)
+#endif
 #define POV_ISINF(x)    (!POV_ISFINITE(x) && !POV_ISNAN(x))
 
 #endif // POVRAY_WINDOWS_SYSPOVCONFIG_H
