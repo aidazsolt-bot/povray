@@ -12,4 +12,10 @@ camera {
 light_source { <-10.6388, 9.5165, -9.4705> color rgb 1.2 }
 background { color rgb 0.02 }
 
-assimp { "models/Rose.ply" }
+assimp {
+  "models/Rose.ply"
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
+}

@@ -7,7 +7,7 @@ global_settings { assumed_gamma 1.0 }
 #declare SplatYLift = 4.5;
 #declare LookAt      = <-1.82, -2.85 + SplatYLift, 0.52>;
 #declare OrbitRadius = 7.992;
-#declare OrbitHeight = LookAt.y + 1.35;
+#declare OrbitHeight = LookAt.y + 2.2;
 #declare AngleDeg    = 45.0;
 #declare Ang0 = atan2(2.0 - LookAt.x, -6.5 - LookAt.z);
 #declare Ang  = Ang0 + clock * 2.0 * pi;

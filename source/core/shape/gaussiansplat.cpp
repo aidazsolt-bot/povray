@@ -4,11 +4,14 @@
 ///
 /// Experimental 3D Gaussian Splatting cloud.
 ///
-/// samples==2: SuperSplat/Kerbl project / tile / depth-sort / 2D EWA (CPU).
-/// khrEllipse: KHR_gaussian_splatting ellipse fidelity on that path
-///   (cameraDistance sort, 3-sigma, float blend, M * Sigma * M^T, no volume
-///   refill on primary miss; secondary = ray-plane billboard). POV finish /
-///   interior IOR is a separate material/relighting layer on the composite hit.
+/// samples==2: SuperSplat/Kerbl project / tile / depth-sort / 2D EWA (CPU),
+///   including the training-rasterizer +0.3px cov low-pass.
+/// khrEllipse: KHR_gaussian_splatting ellipse kernel (ratified):
+///   Sigma = M C C^T M^T, Sigma' = J W Sigma W^T J^T (no +0.3), 3-sigma,
+///   cameraDistance sort, float blend then clamp, SH via R^{-1}*viewDir,
+///   no volume refill on primary miss; secondary = orthographic ray-plane
+///   Sigma projection (spec forward pass is camera-primary).
+/// POV finish / interior IOR = optional relighting (allowed by the spec).
 /// samples<=1 peak and samples>=3 Vol3DGS remain along-ray (GI / hybrid).
 ///
 //******************************************************************************
@@ -207,6 +210,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     shDegree(3),
     opacityCutoff(1.0 / 255.0),
     alphaStop(0.999),
+    maxQuadFrac(0.0),
     samples(4),
     maxHits(0),
     bvhLeafSize(1),
@@ -215,6 +219,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     materialShading(false),
     cullSingletonHits(true),
     khrEllipse(false),
+    khrSortCameraDistance(true),
     asSurface(false),
     inverseSurface(false),
     surfaceSmooth(false),
@@ -247,6 +252,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->shDegree = shDegree;
     New->opacityCutoff = opacityCutoff;
     New->alphaStop = alphaStop;
+    New->maxQuadFrac = maxQuadFrac;
     New->samples = samples;
     New->maxHits = maxHits;
     New->bvhLeafSize = bvhLeafSize;
@@ -255,6 +261,11 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->materialShading = materialShading;
     New->cullSingletonHits = cullSingletonHits;
     New->khrEllipse = khrEllipse;
+    New->khrKernel = khrKernel;
+    New->khrColorSpace = khrColorSpace;
+    New->khrProjection = khrProjection;
+    New->khrSortingMethod = khrSortingMethod;
+    New->khrSortCameraDistance = khrSortCameraDistance;
     New->asSurface = asSurface;
     New->inverseSurface = inverseSurface;
     New->exportMeshPath = exportMeshPath;
@@ -562,7 +573,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             const DBL J00 = fx * invZ, J02 = fx * tx * invZ2;
             const DBL J11 = fy * invZ, J12 = fy * ty * invZ2;
 
-            // cov2d = J * Σ_cam * Jᵀ  (2×2), then +0.3 px low-pass on diagonal.
+            // cov2d = J * Σ_cam * Jᵀ  (2x2). Kerbl +0.3px low-pass is NOT in KHR.
             auto Sj = [&](int row, int colJ) -> DBL {
                 // (Σ_cam * Jᵀ)[row][colJ]
                 if (colJ == 0)
@@ -572,8 +583,11 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             DBL cov00 = J00 * Sj(0, 0) + J02 * Sj(2, 0);
             DBL cov01 = J00 * Sj(0, 1) + J02 * Sj(2, 1);
             DBL cov11 = J11 * Sj(1, 1) + J12 * Sj(2, 1);
-            cov00 += 0.3;
-            cov11 += 0.3;
+            if (!khrEllipse)
+            {
+                cov00 += 0.3;
+                cov11 += 0.3;
+            }
 
             const DBL det = cov00 * cov11 - cov01 * cov01;
             if (det < EPSILON)
@@ -681,9 +695,29 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
     }
 }
 
+void GaussianSplatCloud::ViewDirForSH(const Vector3d& camToSplatWorld, Vector3d& outLocal) const
+{
+    // KHR: SH coefficients SHOULD be transformed by the node rotation. Equivalent:
+    // evaluate SH with R^{-1} * viewDir (authoring / pre-Trans frame).
+    if (Trans != nullptr)
+    {
+        MInvTransDirection(outLocal, camToSplatWorld, Trans);
+        if (outLocal.lengthSqr() > EPSILON)
+            outLocal.normalize();
+        else
+            outLocal = camToSplatWorld.normalized();
+    }
+    else
+    {
+        outLocal = camToSplatWorld;
+        if (outLocal.lengthSqr() > EPSILON)
+            outLocal.normalize();
+    }
+}
+
 void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const
 {
-    // viewDir = camera → splat (SuperSplat / Inria convention).
+    // viewDir = camera → splat in the SH authoring frame (see ViewDirForSH).
     Vector3d dir = viewDir.normalized();
     const DBL x = dir[X], y = dir[Y], z = dir[Z];
 
@@ -871,13 +905,15 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
             continue;
         const GaussianSplatPoint& spoint = points[static_cast<size_t>(hits[i].idx)];
         Vector3d rgb;
-        // SH expects camera→splat (SuperSplat); viewDir arg is toward camera.
+        // SH expects camera→splat in authoring frame; viewDir arg is toward camera.
         Vector3d camToSplat = spoint.position - origin;
         if (camToSplat.lengthSqr() > EPSILON)
             camToSplat.normalize();
         else
             camToSplat = -viewDir;
-        EvalColour(spoint, camToSplat, rgb);
+        Vector3d shDir;
+        ViewDirForSH(camToSplat, shDir);
+        EvalColour(spoint, shDir, rgb);
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
         depthSum += hits[i].t * contrib;
@@ -1002,11 +1038,26 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         DBL cov00 = jx0 * Sj(0, 0) + jx2 * Sj(2, 0);
         DBL cov01 = jx0 * Sj(0, 1) + jx2 * Sj(2, 1);
         DBL cov11 = jy1 * Sj(1, 1) + jy2 * Sj(2, 1);
-        cov00 += 0.3;
-        cov11 += 0.3;
+        // Kerbl screen-space low-pass; omitted for KHR ellipse fidelity.
+        if (!khrEllipse)
+        {
+            cov00 += 0.3;
+            cov11 += 0.3;
+        }
         const DBL det = cov00 * cov11 - cov01 * cov01;
         if (det <= EPSILON)
             continue;
+
+        // Sample Viewer / khronos.vert: discard huge projected quads
+        // (max(3*sqrt(a), 3*sqrt(c)) > max_quad_frac * min(W,H)). 0 = off.
+        if (maxQuadFrac > EPSILON && cam.screenW > EPSILON && cam.screenH > EPSILON)
+        {
+            const DBL quadW = kExtentSigma * std::sqrt(std::max(0.0, cov00));
+            const DBL quadH = kExtentSigma * std::sqrt(std::max(0.0, cov11));
+            const DBL minScreen = std::min(cam.screenW, cam.screenH);
+            if (std::max(quadW, quadH) > maxQuadFrac * minScreen)
+                continue;
+        }
 
         const DBL mid = 0.5 * (cov00 + cov11);
         const DBL rad = std::sqrt(std::max(0.0, 0.25 * (cov00 - cov11) * (cov00 - cov11) + cov01 * cov01));
@@ -1022,7 +1073,9 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         Vector3d rgb;
         Vector3d camToSplat = rel;
         camToSplat.normalize();
-        EvalColour(sp, camToSplat, rgb);
+        Vector3d shDir;
+        ViewDirForSH(camToSplat, shDir);
+        EvalColour(sp, shDir, rgb);
         // KHR: blend in float, tonemap/clamp after composition. Legacy path tonemaps early.
         if (!khrEllipse)
             rgb = TonemapSplatRgb(rgb);
@@ -1146,7 +1199,11 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         if (alpha < opacityCutoff)
             continue;
         TraceThreadData::GaussianSplatHitRec rec;
-        rec.t = khrEllipse ? e.camDist : e.depth;
+        // KHR default sortingMethod cameraDistance; legacy Kerbl uses view-forward depth.
+        if (khrEllipse)
+            rec.t = khrSortCameraDistance ? e.camDist : e.depth;
+        else
+            rec.t = e.depth;
         rec.w = alpha;
         rec.idx = ei; // index into projCache.entries (colour baked in)
         hits.push_back(rec);
@@ -1232,6 +1289,8 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         cam.fy = Thread->GaussianSplatCam.fy;
         cam.screenU = Thread->GaussianSplatCam.screenU;
         cam.screenV = Thread->GaussianSplatCam.screenV;
+        cam.screenW = Thread->GaussianSplatCam.screenW;
+        cam.screenH = Thread->GaussianSplatCam.screenH;
         cam.camValid = true;
         cam.pixelValid = true;
         if (EnsureProjectedCache(cam) &&
@@ -1253,7 +1312,11 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
             Vector3d rgb = seg.colour;
             if (alphaOut > EPSILON)
                 rgb /= alphaOut;
-            rgb = TonemapSplatRgb(rgb);
+            // KHR: C clamped or tonemapped after float blend (display-referred).
+            if (khrEllipse)
+                rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+            else
+                rgb = TonemapSplatRgb(rgb);
 
             Thread->GaussianSplatColourValid = true;
             Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
@@ -1268,7 +1331,8 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
             return false; // Spec miss: do not refill with 3D volume alpha.
     }
 
-    // Secondary / non-projected: khrEllipse uses ray-plane billboard only (no primary J).
+    // Secondary / non-projected: khrEllipse uses orthographic ray-plane Sigma
+    // projection (no perspective J; KHR forward pass is defined for a camera).
     const bool useKerbl = primaryProj && !khrEllipse;
     if (!IntegrateAlongRay(origin, dir, kDepthTolerance, BOUND_HUGE, viewDir, seg, Thread, useKerbl))
         return false;
@@ -1286,7 +1350,10 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     Vector3d rgb = seg.colour;
     if (alphaOut > EPSILON)
         rgb /= alphaOut;
-    rgb = TonemapSplatRgb(rgb);
+    if (khrEllipse)
+        rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+    else
+        rgb = TonemapSplatRgb(rgb);
 
     Thread->GaussianSplatColourValid = true;
     Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));

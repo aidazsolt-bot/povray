@@ -20,4 +20,5 @@ gaussian_splat {
   samples 2
   alpha_stop 0.999
   opacity_cutoff 0.0039
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }

@@ -31,6 +31,10 @@ gaussian_splat {
   sh_degree 3
   samples 4
   opacity_cutoff 0.0039
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // ../unix/povray +W3840 +H2160 -D -Oresults/rose_vol_4k.png rose_vol_4k.pov

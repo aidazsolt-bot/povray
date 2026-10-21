@@ -28,6 +28,10 @@ gaussian_splat {
   opacity_cutoff 0.005
   gi_weight 1.0
   translate <0, SplatYLift, 0>
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // Single control plane: glossy floor on the y=0 plane (no walls).

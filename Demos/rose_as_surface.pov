@@ -20,6 +20,10 @@ gaussian_splat {
   // voxel_size 0.05
   // voxel_opacity 0.1
   sh_degree 3
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // ../unix/povray +W800 +H600 -D -Oresults/rose_as_surface.png rose_as_surface.pov

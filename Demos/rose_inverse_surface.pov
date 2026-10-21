@@ -41,6 +41,10 @@ gaussian_splat {
       roughness 0.08
     }
   }
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // ../unix/povray +W800 +H600 -D -Oresults/rose_inverse_surface.png rose_inverse_surface.pov

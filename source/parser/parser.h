@@ -782,20 +782,18 @@ class Parser final
 #if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT
         void Parse_Obj (Mesh*);
 #endif
-#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-        ObjectPtr Parse_Ply();
-        void Parse_Ply_Mesh(Mesh*);
-#endif
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
         ObjectPtr Parse_Assimp();
         ObjectPtr Parse_Gaussian_Splat();
         void Parse_Assimp_Mesh(Mesh*);
         void Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
-                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight,
+                                        DBL &opacityCutoff, DBL &alphaStop, DBL &maxQuadFrac,
+                                        int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
-                                        bool &khrEllipse, bool &inverseSurface, std::string &exportMeshPath);
+                                        bool &khrEllipse, bool &sortDepth, bool &inverseSurface,
+                                        std::string &exportMeshPath);
 #endif
         void Parse_Mesh1 (Mesh*);
         void Parse_Mesh2 (Mesh*);

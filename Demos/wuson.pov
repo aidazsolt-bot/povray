@@ -1,4 +1,5 @@
-// PLY mesh import demo — Wuson.ply
+// Assimp mesh import demo — Wuson.ply
+// (legacy ply { } importer removed; use assimp)
 // Camera framed from Assimp AABB of the same model.
 #version 3.8;
 global_settings { assumed_gamma 1.0 }
@@ -12,7 +13,7 @@ camera {
 light_source { <-5.4856, 8.3000, -6.1713> color rgb 1.2 }
 background { color rgb <0.2, 0.3, 0.4> }
 
-ply { "models/Wuson.ply"
+assimp { "models/Wuson.ply"
   pigment { rgb <0.85, 0.75, 0.65> }
   finish { ambient 0.25 diffuse 0.75 }
 }

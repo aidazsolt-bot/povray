@@ -1,4 +1,5 @@
-// PLY Gaussian-splat import demo — Rose.ply
+// Assimp Gaussian-splat import demo — Rose.ply
+// (legacy ply { } importer removed; use assimp / gaussian_splat)
 // Uses GaussianSplatCloud (soft BVH + SH alpha composite). For emission-only
 // photoreal-style lighting see rose_photo.pov / rose_training_camera.pov.
 // Camera framed from Assimp AABB of the same model.
@@ -14,4 +15,10 @@ camera {
 light_source { <-10.6388, 9.5165, -9.4705> color rgb 1.2 }
 background { color rgb 0.02 }
 
-ply { "models/Rose.ply" }
+assimp {
+  "models/Rose.ply"
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
+}

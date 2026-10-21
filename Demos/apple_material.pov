@@ -41,6 +41,7 @@ gaussian_splat {
       emission rgb 0.12
     }
   }
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }
 
 // ../unix/povray +W4096 +H2160 -D -Oresults/apple_material.png apple_material.pov

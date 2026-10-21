@@ -3586,7 +3586,7 @@ ObjectPtr Parser::Parse_Mesh()
 
     Object = new Mesh();
 
-#if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT || POV_PARSER_EXPERIMENTAL_PLY_IMPORT || POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+#if POV_PARSER_EXPERIMENTAL_OBJ_IMPORT || POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
 
     EXPECT_ONE
 
@@ -3601,13 +3601,6 @@ ObjectPtr Parser::Parse_Mesh()
         CASE (OBJ_TOKEN)
             mExperimentalFlags.objImport = true;
             Parse_Obj (Object);
-        END_CASE
-#endif
-
-#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-        CASE (PLY_TOKEN)
-            mExperimentalFlags.plyImport = true;
-            Parse_Ply_Mesh (Object);
         END_CASE
 #endif
 
@@ -6399,12 +6392,6 @@ ObjectPtr Parser::Parse_Object ()
             Object = Parse_Mesh2();
         END_CASE
         /* NK ---- */
-
-#if POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-        CASE (PLY_TOKEN)
-            Object = Parse_Ply();
-        END_CASE
-#endif
 
 #if POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
         CASE (ASSIMP_TOKEN)

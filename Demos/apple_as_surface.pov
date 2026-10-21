@@ -18,6 +18,7 @@ gaussian_splat {
   filter_floaters 0.05, 0.1, 0.004
   surface_smooth
   sh_degree 3
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }
 
 // ../unix/povray +W800 +H600 -D -Oresults/apple_as_surface.png apple_as_surface.pov

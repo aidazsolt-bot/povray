@@ -18,4 +18,8 @@ assimp {
     pigment { color rgb <0.75, 0.55, 0.45> }
     finish { ambient 0.08 diffuse 0.75 specular 0.2 roughness 0.1 }
   }
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }

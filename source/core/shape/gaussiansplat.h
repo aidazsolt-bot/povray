@@ -35,20 +35,22 @@ struct GaussianSplatCamBasis final
     Vector3d origin, right, up, forward;
     DBL fx, fy;
     DBL screenU, screenV;
+    DBL screenW, screenH; ///< Frame size in pixels (max_quad_frac cull).
     bool camValid;
     bool pixelValid;
     GaussianSplatCamBasis() :
-        fx(1), fy(1), screenU(0), screenV(0), camValid(false), pixelValid(false) {}
+        fx(1), fy(1), screenU(0), screenV(0), screenW(0), screenH(0),
+        camValid(false), pixelValid(false) {}
 };
 
-/// One anisotropic Gaussian (decoded scales / opacity; SH rest in side array).
+/// One anisotropic Gaussian (KHR-native attrs; SH rest in side array).
 struct GaussianSplatPoint final
 {
     Vector3d position;
-    Vector3d scale;      ///< Linear (exp'd) per-axis scales.
-    DBL qw, qx, qy, qz;  ///< Rotation quaternion (wxyz / rot_0..3).
-    DBL opacity;         ///< Already sigmoid'd into [0,1].
-    Vector3d dc;         ///< SH degree-0 coeffs (f_dc_*).
+    Vector3d scale;      ///< KHR linear non-negative per-axis scales.
+    DBL qw, qx, qy, qz;  ///< Unit quaternion in wxyz (from glTF xyzw on import).
+    DBL opacity;         ///< KHR linear opacity in [0,1].
+    Vector3d dc;         ///< SH degree-0 coeffs (SH_DEGREE_0_COEF_0 / f_dc_*).
     unsigned restOffset; ///< Index into restCoeffs (restCount entries).
 };
 
@@ -80,6 +82,9 @@ class GaussianSplatCloud final : public NonsolidObject
         int shDegree;                ///< Max SH degree to evaluate (0..3).
         DBL opacityCutoff;           ///< Skip weights below this.
         DBL alphaStop;               ///< Stop compositing when accumulated alpha exceeds this.
+        /// Sample-Viewer huge-quad cull: skip if max(3*sqrt(cov_ii)) > frac * min(W,H).
+        /// 0 = disabled (legacy); 0.5 = Khronos / glTF Sample Viewer default.
+        DBL maxQuadFrac;
         int samples;                 ///< 1 = 3D peak; 2 = project/sort/blend (Kerbl); >=3 = Vol3DGS volume α.
         int maxHits;                 ///< Cap on collected splat hits (0 = adaptive soft cap).
         int bvhLeafSize;             ///< BVH leaf size (1 = quality).
@@ -93,9 +98,17 @@ class GaussianSplatCloud final : public NonsolidObject
         bool cullSingletonHits;
         /// KHR_gaussian_splatting ellipse kernel fidelity:
         /// samples=2 projected path, cameraDistance sort, 3-sigma cutoff,
-        /// float blend before tonemap, Sigma transformed by node M, no volume
-        /// refill on primary miss, secondary = ray-plane billboard (not primary J).
+        /// float blend before tonemap, Sigma = M C C^T M^T, no Kerbl 0.3px
+        /// low-pass, no volume refill on primary miss; secondary = orthographic
+        /// ray-plane projection of Sigma (no perspective J; spec is camera-primary).
         bool khrEllipse;
+        /// Authored KHR meta from Assimp (empty if source had none, e.g. PLY).
+        std::string khrKernel;       ///< e.g. "ellipse"
+        std::string khrColorSpace;   ///< e.g. "srgb_rec709_display"
+        std::string khrProjection;   ///< e.g. "perspective" (default)
+        std::string khrSortingMethod; ///< e.g. "cameraDistance" (default)
+        /// When true (KHR default / authored): sort by ||mu-cam||; else view-forward depth.
+        bool khrSortCameraDistance;
         /// SuperSplat-style opacity voxel surface (as_surface): replace cloud with Mesh.
         bool asSurface;
         /// Inverse-surface extract: opaque MC mesh from occupancy (no volume, no IOR).
@@ -167,8 +180,12 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Build BVH after points/restCoeffs are filled. Call before render.
         void BuildAcceleration();
 
-        /// Evaluate SH colour. @p viewDir is camera→splat (SuperSplat / Inria convention).
+        /// Evaluate SH colour. @p viewDir is camera→splat in the SH/authoring frame
+        /// (object space before node Trans; KHR: rotate SH / equivalently R^{-1} view).
         void EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const;
+
+        /// Map world-space camera→splat direction into the SH authoring frame (applies R^{-1}).
+        void ViewDirForSH(const Vector3d& camToSplatWorld, Vector3d& outLocal) const;
 
         /// Integrate SH emission + alpha along ray segment [t0,t1] in object/local space.
         /// @param viewDir  Direction toward viewer (typically -dir) — flipped to camera→splat for SH.

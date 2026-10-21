@@ -18,4 +18,5 @@ assimp {
     pigment { color rgb <0.75, 0.55, 0.45> }
     finish { ambient 0.08 diffuse 0.75 specular 0.2 roughness 0.1 }
   }
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }

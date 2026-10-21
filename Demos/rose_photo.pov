@@ -17,6 +17,10 @@ gaussian_splat {
   samples 2
   alpha_stop 0.999
   opacity_cutoff 0.0039
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // ../unix/povray +W1920 +H1080 -D -Oresults/rose_veiled_baseline.png rose_photo.pov

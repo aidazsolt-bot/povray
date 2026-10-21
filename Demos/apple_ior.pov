@@ -45,6 +45,7 @@ gaussian_splat {
   interior {
     ior 1.33
   }
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }
 
 // ../unix/povray +W4096 +H2160 -D -Oresults/apple_ior.png apple_ior.pov

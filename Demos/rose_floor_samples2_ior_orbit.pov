@@ -4,10 +4,10 @@
 global_settings { assumed_gamma 1.0 }
 
 #declare RoseAabbMinY = -4.484253;
-#declare FloorY       = RoseAabbMinY - 1.0;
-#declare LookAt       = <-1.787, -2.654, 0.487>;
+#declare FloorY       = RoseAabbMinY - 0.05;
+#declare LookAt       = <-1.7874, -2.6543, 0.4874>;
 #declare OrbitRadius  = 8.390;
-#declare OrbitHeight  = -1.2;
+#declare OrbitHeight  = 1.8;
 #declare AngleDeg     = 45.0;
 #declare Ang0         = atan2(2.0 - LookAt.x, -7.0 - LookAt.z);
 #declare Ang          = Ang0 + clock * 2.0 * pi;

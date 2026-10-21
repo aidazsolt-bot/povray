@@ -9,7 +9,8 @@
 ///   mesh { assimp "file.ext" }            // triangle mesh only
 ///
 /// Data is taken from Assimp's aiScene / aiMesh / aiMaterial and, when present,
-/// aiGetGaussianSplat(). Animation clips are reported (not yet time-sampled).
+/// aiGetGaussianSplat() in KHR-native value space (linear opacity/scale,
+/// glTF xyzw quat). Animation clips are reported (not yet time-sampled).
 ///
 //******************************************************************************
 
@@ -80,9 +81,13 @@ inline DBL Clamp01(DBL v)
     return max(0.0, min(1.0, v));
 }
 
-inline DBL Sigmoid(DBL x)
+/// Assimp aiGaussianSplat::mRotation stores (r,g,b,a) == (x,y,z,w) glTF order.
+inline void AssimpQuatToWxyz(const aiColor4D &q, DBL &qw, DBL &qx, DBL &qy, DBL &qz)
 {
-    return 1.0 / (1.0 + std::exp(-x));
+    qx = static_cast<DBL>(q.r);
+    qy = static_cast<DBL>(q.g);
+    qz = static_cast<DBL>(q.b);
+    qw = static_cast<DBL>(q.a);
 }
 
 void QuaternionToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
@@ -474,11 +479,19 @@ void ReportAssimpBounds(Parser *parser, const aiScene *scene)
                     mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], cx, cy, cz, r);
 }
 
+static std::string AiStringToStd(const aiString &s)
+{
+    if (s.length == 0 || s.data[0] == '\0')
+        return std::string();
+    return std::string(s.C_Str());
+}
+
 ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene, DBL sphereScale, size_t maxCount, int shDegree)
 {
     GaussianSplatCloud *cloud = new GaussianSplatCloud();
     cloud->shDegree = shDegree;
     size_t remaining = (maxCount > 0) ? maxCount : static_cast<size_t>(-1);
+    bool metaCaptured = false;
 
     for (unsigned mi = 0; mi < scene->mNumMeshes && remaining > 0; ++mi)
     {
@@ -486,6 +499,22 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
         const aiGaussianSplat *gs = aiGetGaussianSplat(scene, mi);
         if (mesh == nullptr || gs == nullptr || gs->mDC == nullptr || gs->mScale == nullptr || gs->mOpacity == nullptr)
             continue;
+
+        if (!metaCaptured)
+        {
+            cloud->khrKernel = AiStringToStd(gs->mKernel);
+            cloud->khrColorSpace = AiStringToStd(gs->mColorSpace);
+            cloud->khrProjection = AiStringToStd(gs->mProjection);
+            cloud->khrSortingMethod = AiStringToStd(gs->mSortingMethod);
+            // KHR defaults when authored strings are empty (PLY / SPZ / etc.).
+            if (cloud->khrProjection.empty())
+                cloud->khrProjection = "perspective";
+            if (cloud->khrSortingMethod.empty())
+                cloud->khrSortingMethod = "cameraDistance";
+            cloud->khrSortCameraDistance =
+                (cloud->khrSortingMethod == "cameraDistance");
+            metaCaptured = true;
+        }
 
         if (cloud->restCount == 0 && gs->mNumRestCoeffs > 0)
             cloud->restCount = gs->mNumRestCoeffs;
@@ -495,24 +524,22 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
         {
             const aiVector3D &pos = mesh->mVertices[vi];
             const aiVector3D &dc = gs->mDC[vi];
-            DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
+            // Assimp already converted PLY logits / log-scales to KHR linear space.
+            DBL opacity = Clamp01(static_cast<DBL>(gs->mOpacity[vi]));
             if (opacity < (1.0 / 255.0))
                 continue;
 
             const aiVector3D &scl = gs->mScale[vi];
-            DBL sx = std::exp(static_cast<DBL>(scl.x)) * sphereScale;
-            DBL sy = std::exp(static_cast<DBL>(scl.y)) * sphereScale;
-            DBL sz = std::exp(static_cast<DBL>(scl.z)) * sphereScale;
+            DBL sx = max(static_cast<DBL>(scl.x), 0.0) * sphereScale;
+            DBL sy = max(static_cast<DBL>(scl.y), 0.0) * sphereScale;
+            DBL sz = max(static_cast<DBL>(scl.z), 0.0) * sphereScale;
             sx = max(sx, EPSILON);
             sy = max(sy, EPSILON);
             sz = max(sz, EPSILON);
 
             DBL qw = 1.0, qx = 0.0, qy = 0.0, qz = 0.0;
             if (gs->mRotation != nullptr)
-            {
-                const aiColor4D &q = gs->mRotation[vi];
-                qw = q.r; qx = q.g; qy = q.b; qz = q.a;
-            }
+                AssimpQuatToWxyz(gs->mRotation[vi], qw, qx, qy, qz);
 
             GaussianSplatPoint sp;
             sp.position = Vector3d(pos.x, pos.y, pos.z);
@@ -545,8 +572,27 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
 
     cloud->BuildAcceleration();
     cloud->Compute_BBox();
-    parser->Warning("Imported %lu Gaussian splat(s) via Assimp as GaussianSplatCloud (SH degree <= %d, rest=%u).",
-                    static_cast<unsigned long>(cloud->points.size()), cloud->shDegree, cloud->restCount);
+
+    if (!cloud->khrKernel.empty() && cloud->khrKernel != "ellipse")
+        parser->Warning("KHR_gaussian_splatting kernel '%s' is not 'ellipse'; "
+                        "POV-Ray only implements the ellipse kernel.",
+                        cloud->khrKernel.c_str());
+    if (!cloud->khrProjection.empty() && cloud->khrProjection != "perspective")
+        parser->Warning("KHR_gaussian_splatting projection '%s' is not 'perspective'; "
+                        "rendering with perspective Jacobian.",
+                        cloud->khrProjection.c_str());
+    if (!cloud->khrSortCameraDistance)
+        parser->Warning("KHR_gaussian_splatting sortingMethod '%s' is not 'cameraDistance'; "
+                        "using view-forward depth sort instead.",
+                        cloud->khrSortingMethod.c_str());
+
+    parser->Warning("Imported %lu Gaussian splat(s) via Assimp as GaussianSplatCloud "
+                    "(SH degree <= %d, rest=%u, kernel=%s, colorSpace=%s, projection=%s, sort=%s).",
+                    static_cast<unsigned long>(cloud->points.size()), cloud->shDegree, cloud->restCount,
+                    cloud->khrKernel.empty() ? "(none)" : cloud->khrKernel.c_str(),
+                    cloud->khrColorSpace.empty() ? "(none)" : cloud->khrColorSpace.c_str(),
+                    cloud->khrProjection.c_str(),
+                    cloud->khrSortingMethod.c_str());
     return reinterpret_cast<ObjectPtr>(cloud);
 }
 
@@ -574,27 +620,22 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
             DBL r = 0.5 + kShC0 * dc.x;
             DBL g = 0.5 + kShC0 * dc.y;
             DBL b = 0.5 + kShC0 * dc.z;
-            DBL opacity = Sigmoid(static_cast<DBL>(gs->mOpacity[vi]));
+            // Assimp already converted PLY logits / log-scales to KHR linear space.
+            DBL opacity = Clamp01(static_cast<DBL>(gs->mOpacity[vi]));
             if (opacity < (1.0 / 255.0))
                 continue;
 
             const aiVector3D &scl = gs->mScale[vi];
-            DBL sx = std::exp(static_cast<DBL>(scl.x)) * sphereScale;
-            DBL sy = std::exp(static_cast<DBL>(scl.y)) * sphereScale;
-            DBL sz = std::exp(static_cast<DBL>(scl.z)) * sphereScale;
+            DBL sx = max(static_cast<DBL>(scl.x), 0.0) * sphereScale;
+            DBL sy = max(static_cast<DBL>(scl.y), 0.0) * sphereScale;
+            DBL sz = max(static_cast<DBL>(scl.z), 0.0) * sphereScale;
             sx = max(sx, EPSILON);
             sy = max(sy, EPSILON);
             sz = max(sz, EPSILON);
 
             DBL qw = 1.0, qx = 0.0, qy = 0.0, qz = 0.0;
             if (gs->mRotation != nullptr)
-            {
-                const aiColor4D &q = gs->mRotation[vi];
-                qw = q.r;
-                qx = q.g;
-                qy = q.b;
-                qz = q.a;
-            }
+                AssimpQuatToWxyz(gs->mRotation[vi], qw, qx, qy, qz);
 
             Sphere *sph = new Sphere();
             sph->Center = Vector3d(0.0, 0.0, 0.0);
@@ -928,11 +969,13 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
 } // namespace
 
 void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
-                                        DBL &opacityCutoff, DBL &alphaStop, int &samples, int &maxHits, DBL &giWeight,
+                                        DBL &opacityCutoff, DBL &alphaStop, DBL &maxQuadFrac,
+                                        int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
-                                        bool &khrEllipse, bool &inverseSurface, std::string &exportMeshPath)
+                                        bool &khrEllipse, bool &sortDepth, bool &inverseSurface,
+                                        std::string &exportMeshPath)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -954,6 +997,10 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             alphaStop = 0.999;
             asSurface = false;
             inverseSurface = false;
+        END_CASE
+        CASE (SORT_DEPTH_TOKEN)
+            // Host raster: view-forward depth sort (not KHR cameraDistance).
+            sortDepth = true;
         END_CASE
         CASE (INVERSE_SURFACE_TOKEN)
             // Opaque mesh extract from splat occupancy (no volume path, no IOR).
@@ -1004,6 +1051,12 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             if (alphaStop < 0.0) alphaStop = 0.0;
             if (alphaStop > 1.0) alphaStop = 1.0;
         END_CASE
+        CASE (MAX_QUAD_FRAC_TOKEN)
+            // Sample Viewer huge-quad cull: skip if max(3*sqrt(cov)) > frac*min(W,H).
+            // 0 = off; 0.5 = Khronos / glTF Sample Viewer default.
+            maxQuadFrac = Parse_Float();
+            if (maxQuadFrac < 0.0) maxQuadFrac = 0.0;
+        END_CASE
         CASE (SAMPLES_TOKEN)
             samples = static_cast<int>(Parse_Float());
             if (samples < 1) samples = 1;
@@ -1028,17 +1081,20 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
 namespace
 {
 
-void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, int samples, int maxHits, DBL giWeight,
+void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, DBL maxQuadFrac,
+                               int samples, int maxHits, DBL giWeight,
                                bool asSurface, bool surfaceSmooth, bool filterFloaters,
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
                                DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity,
-                               bool khrEllipse, bool inverseSurface, const std::string &exportMeshPath)
+                               bool khrEllipse, bool sortDepth, bool inverseSurface,
+                               const std::string &exportMeshPath)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
         return;
     cloud->opacityCutoff = opacityCutoff;
     cloud->alphaStop = alphaStop;
+    cloud->maxQuadFrac = maxQuadFrac;
     cloud->samples = samples;
     cloud->maxHits = maxHits;
     cloud->giWeight = giWeight;
@@ -1053,13 +1109,39 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
     cloud->khrEllipse = khrEllipse;
     cloud->inverseSurface = inverseSurface;
     cloud->exportMeshPath = exportMeshPath;
+    if (sortDepth)
+    {
+        cloud->khrSortCameraDistance = false;
+        cloud->khrSortingMethod = "viewDepth";
+    }
     if (khrEllipse)
     {
         cloud->samples = 2;
         cloud->cullSingletonHits = false;
         cloud->asSurface = false;
         cloud->inverseSurface = false;
+        cloud->khrEllipse = true;
+        // Prefer authored sort method; default cameraDistance when unset.
+        // sort_depth overrides to view-forward depth (Host raster).
+        if (!sortDepth && cloud->khrSortingMethod.empty())
+        {
+            cloud->khrSortingMethod = "cameraDistance";
+            cloud->khrSortCameraDistance = true;
+        }
+        if (cloud->khrProjection.empty())
+            cloud->khrProjection = "perspective";
+        if (cloud->khrKernel.empty())
+            cloud->khrKernel = "ellipse";
         // Spec path is display-referred emission + optional POV IOR layer; skip volume GI refill.
+        if (giWeight > 0.999)
+            cloud->giWeight = 0.0;
+    }
+    else if (!cloud->khrKernel.empty() && cloud->khrKernel == "ellipse")
+    {
+        // glTF authored ellipse kernel without explicit khr_ellipse token: enable fidelity path.
+        cloud->khrEllipse = true;
+        cloud->samples = 2;
+        cloud->cullSingletonHits = false;
         if (giWeight > 0.999)
             cloud->giWeight = 0.0;
     }
@@ -1173,6 +1255,7 @@ ObjectPtr Parser::Parse_Assimp()
     int shDegree = 3;
     DBL opacityCutoff = 1.0 / 255.0;
     DBL alphaStop = 0.999;
+    DBL maxQuadFrac = 0.0;
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
@@ -1185,23 +1268,24 @@ ObjectPtr Parser::Parse_Assimp()
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
     bool khrEllipse = false;
+    bool sortDepth = false;
     bool inverseSurface = false;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                               opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, inverseSurface, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, inverseSurface, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, exportMeshPath);
     // For as_surface / inverse_surface: parse texture/interior onto the cloud first so
     // SH colours can pick up finish; inverse_surface then strips IOR on convert.
     if (asSurface || inverseSurface)
@@ -1234,6 +1318,7 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     int shDegree = 3;
     DBL opacityCutoff = 1.0 / 255.0;
     DBL alphaStop = 0.999;
+    DBL maxQuadFrac = 0.0;
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
@@ -1246,23 +1331,24 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     DBL floaterVoxelOpacity = 0.1;
     DBL floaterMinOpacity = 0.004;
     bool khrEllipse = false;
+    bool sortDepth = false;
     bool inverseSurface = false;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, samples, maxHits, giWeight,
+                               opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, inverseSurface, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, samples, maxHits, giWeight,
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, inverseSurface, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, exportMeshPath);
     // For as_surface / inverse_surface: parse mods onto cloud first, then convert.
     if (asSurface || inverseSurface)
     {

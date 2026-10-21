@@ -45,4 +45,5 @@ gaussian_splat {
       emission rgb 0.12
     }
   }
+  rotate <180, 0, 0>  // test: upright Y-up splat (OpenGL/COLMAP often inverted)
 }

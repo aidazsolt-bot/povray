@@ -340,7 +340,9 @@ void SampleColour(const GaussianSplatCloud *cloud, const std::vector<int>& keep,
         if (w < 1.0e-6)
             continue;
         Vector3d rgb;
-        cloud->EvalColour(sp, view, rgb);
+        Vector3d shDir;
+        cloud->ViewDirForSH(view, shDir);
+        cloud->EvalColour(sp, shDir, rgb);
         acc += rgb * w;
         opacSum += op * w;
         wsum += w;

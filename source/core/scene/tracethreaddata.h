@@ -163,9 +163,12 @@ class TraceThreadData : public ThreadData
             DBL fy;            ///< Focal length in pixels (vertical).
             DBL screenU;       ///< Current ray screen U (pixels from centre, +right).
             DBL screenV;       ///< Current ray screen V (pixels from centre, +up).
+            DBL screenW;       ///< Image width in pixels (for max_quad_frac cull).
+            DBL screenH;       ///< Image height in pixels.
             GaussianSplatProj() :
                 camValid(false), pixelValid(false),
-                fx(1.0), fy(1.0), screenU(0.0), screenV(0.0) {}
+                fx(1.0), fy(1.0), screenU(0.0), screenV(0.0),
+                screenW(0.0), screenH(0.0) {}
         };
         GaussianSplatProj GaussianSplatCam;
 

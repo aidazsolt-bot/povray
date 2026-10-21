@@ -32,6 +32,10 @@ gaussian_splat {
       emission rgb 0.12
     }
   }
+  // test: upright Y-up - rotate 180 about Z about AABB center
+  translate <1.7874, 2.6543, -0.4874>
+  rotate <0, 0, 180>
+  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // ../unix/povray +W960 +H540 -D -Oresults/rose_material.png rose_material.pov

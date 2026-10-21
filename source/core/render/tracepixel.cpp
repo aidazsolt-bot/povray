@@ -401,6 +401,8 @@ bool TracePixel::CreateCameraRay(Ray& ray, DBL x, DBL y, DBL width, DBL height, 
                 proj.fy = height * lenD / lenU;
                 proj.screenU = x0 * width;
                 proj.screenV = y0 * height;
+                proj.screenW = width;
+                proj.screenH = height;
                 proj.pixelValid = true;
             }
 

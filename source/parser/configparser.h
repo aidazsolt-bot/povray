@@ -59,11 +59,14 @@
 #endif
 
 /// @def POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-/// Whether experimental PLY import (triangle meshes and 3D Gaussian splat PLYs) should be enabled.
+/// Legacy standalone PLY importer (removed). Use POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
+/// and `assimp { "file.ply" }` / `gaussian_splat { "file.ply" }` instead.
+/// Kept as a hard-off define so old -DPOV_PARSER_EXPERIMENTAL_PLY_IMPORT=1 builds fail closed.
 ///
-#ifndef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-    #define POV_PARSER_EXPERIMENTAL_PLY_IMPORT 0
+#ifdef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
+    #undef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
 #endif
+#define POV_PARSER_EXPERIMENTAL_PLY_IMPORT 0
 
 /// @def POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
 /// Whether experimental Assimp-based model import (meshes, materials, Gaussian splats via Arris API) should be enabled.
