@@ -172,6 +172,24 @@ void TransformCovariance(DBL Sigma[3][3], const TRANSFORM *Trans)
     }
 }
 
+Vector3d SplatNormalObject(const GaussianSplatPoint& sp, const TRANSFORM *sourceTransform)
+{
+    MATRIX Rmat;
+    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
+    int axis = 0;
+    if (sp.scale[Y] < sp.scale[axis])
+        axis = 1;
+    if (sp.scale[Z] < sp.scale[axis])
+        axis = 2;
+
+    Vector3d normal(Rmat[0][axis], Rmat[1][axis], Rmat[2][axis]);
+    if (sourceTransform != nullptr)
+        MTransNormal(normal, normal, sourceTransform);
+    if (normal.lengthSqr() > EPSILON)
+        normal.normalize();
+    return normal;
+}
+
 void InverseRotationDirection(Vector3d& result, const Vector3d& direction, const TRANSFORM *transform)
 {
     if (transform == nullptr)
@@ -246,6 +264,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     bvhLeafSize(1),
     giWeight(1.0),
     opacityScale(1.0),
+    lightingMode(GaussianSplatLightingMode::Automatic),
     materialShading(false),
     cullSingletonHits(true),
     khrEllipse(false),
@@ -293,6 +312,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->bvhLeafSize = bvhLeafSize;
     New->giWeight = giWeight;
     New->opacityScale = opacityScale;
+    New->lightingMode = lightingMode;
     New->materialShading = materialShading;
     New->cullSingletonHits = cullSingletonHits;
     New->khrEllipse = khrEllipse;
@@ -331,6 +351,10 @@ bool GaussianSplatCloud::IsOpaque() const
 
 bool GaussianSplatCloud::WantsMaterialShading() const
 {
+    if (lightingMode == GaussianSplatLightingMode::Relight)
+        return true;
+    if (lightingMode == GaussianSplatLightingMode::Khr)
+        return false;
     if (materialShading)
         return true;
     if (interior != nullptr && interior->IOR > SNGL(1.0) + EPSILON)
@@ -826,12 +850,21 @@ void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d
     rgb = Vector3d(std::max(0.0, rgb[X]), std::max(0.0, rgb[Y]), std::max(0.0, rgb[Z]));
 }
 
+void GaussianSplatCloud::EvalDiffuseColour(const GaussianSplatPoint& sp, Vector3d& rgb) const
+{
+    rgb = Vector3d(
+        std::max(0.0, 0.5 + kShC0 * sp.dc[X]),
+        std::max(0.0, 0.5 + kShC0 * sp.dc[Y]),
+        std::max(0.0, 0.5 + kShC0 * sp.dc[Z]));
+}
+
 bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3d& dir,
                                            DBL t0, DBL t1, const Vector3d& viewDir,
                                            GaussianSplatSegmentResult& out, TraceThreadData *Thread,
                                            bool useKerbl) const
 {
     out.colour = Vector3d(0.0, 0.0, 0.0);
+    out.normal = Vector3d(0.0, 0.0, 0.0);
     out.transmittance = 1.0;
     out.depth = 0.0;
     out.valid = false;
@@ -935,6 +968,7 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     DBL T = 1.0;
     DBL depthSum = 0.0;
     DBL depthW = 0.0;
+    Vector3d normalSum(0.0, 0.0, 0.0);
 
     for (size_t i = 0; i < hits.size() && T > (1.0 - alphaStop); ++i)
     {
@@ -944,17 +978,31 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
             continue;
         const GaussianSplatPoint& spoint = points[static_cast<size_t>(hits[i].idx)];
         Vector3d rgb;
-        // SH expects camera→splat in authoring frame; viewDir arg is toward camera.
-        Vector3d camToSplat = spoint.position - origin;
-        if (camToSplat.lengthSqr() > EPSILON)
-            camToSplat.normalize();
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+            EvalDiffuseColour(spoint, rgb);
         else
-            camToSplat = -viewDir;
-        Vector3d shDir;
-        ViewDirForSH(spoint, camToSplat, shDir);
-        EvalColour(spoint, shDir, rgb);
+        {
+            // SH expects camera→splat in authoring frame; viewDir arg is toward camera.
+            Vector3d camToSplat = spoint.position - origin;
+            if (camToSplat.lengthSqr() > EPSILON)
+                camToSplat.normalize();
+            else
+                camToSplat = -viewDir;
+            Vector3d shDir;
+            ViewDirForSH(spoint, camToSplat, shDir);
+            EvalColour(spoint, shDir, rgb);
+        }
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+        {
+            const TRANSFORM *sourceTransform =
+                (spoint.transformIndex < sourceTransforms.size()) ? &sourceTransforms[spoint.transformIndex] : nullptr;
+            Vector3d normal = SplatNormalObject(spoint, sourceTransform);
+            if (dot(normal, viewDir) < 0.0)
+                normal = -normal;
+            normalSum += normal * contrib;
+        }
         depthSum += hits[i].t * contrib;
         depthW += contrib;
         T *= (1.0 - alpha);
@@ -965,6 +1013,9 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
         return false;
 
     out.colour = acc;
+    out.normal = normalSum;
+    if (out.normal.lengthSqr() > EPSILON)
+        out.normal.normalize();
     out.transmittance = T;
     out.depth = (depthW > EPSILON) ? (depthSum / depthW) : hits[0].t;
     out.valid = true;
@@ -1109,14 +1160,31 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         const DBL meanV = cam.fy * ty * invZ;
 
         Vector3d rgb;
-        Vector3d camToSplat = rel;
-        camToSplat.normalize();
-        Vector3d shDir;
-        ViewDirForSH(sp, camToSplat, shDir);
-        EvalColour(sp, shDir, rgb);
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+            EvalDiffuseColour(sp, rgb);
+        else
+        {
+            Vector3d camToSplat = rel;
+            camToSplat.normalize();
+            Vector3d shDir;
+            ViewDirForSH(sp, camToSplat, shDir);
+            EvalColour(sp, shDir, rgb);
+        }
         // KHR: blend in float, tonemap/clamp after composition. Legacy path tonemaps early.
         if (!khrEllipse)
             rgb = TonemapSplatRgb(rgb);
+
+        Vector3d normal(0.0, 0.0, 0.0);
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+        {
+            normal = SplatNormalObject(sp, sourceTransform);
+            if (Trans != nullptr)
+                MTransNormal(normal, normal, Trans);
+            if (normal.lengthSqr() > EPSILON)
+                normal.normalize();
+            if (dot(normal, rel) > 0.0)
+                normal = -normal;
+        }
 
         ProjEntry e;
         e.meanU = meanU;
@@ -1130,6 +1198,9 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         e.r = rgb[X];
         e.g = rgb[Y];
         e.b = rgb[Z];
+        e.nx = normal[X];
+        e.ny = normal[Y];
+        e.nz = normal[Z];
         projCache.entries.push_back(e);
         projectedExtentsU.push_back(extentU);
         projectedExtentsV.push_back(extentV);
@@ -1197,6 +1268,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
                                                  TraceThreadData *Thread) const
 {
     out.colour = Vector3d(0.0, 0.0, 0.0);
+    out.normal = Vector3d(0.0, 0.0, 0.0);
     out.transmittance = 1.0;
     out.depth = 0.0;
     out.valid = false;
@@ -1268,6 +1340,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
     DBL T = 1.0;
     DBL depthSum = 0.0;
     DBL depthW = 0.0;
+    Vector3d normalSum(0.0, 0.0, 0.0);
     for (size_t i = 0; i < hits.size() && (khrEllipse || T > (1.0 - alphaStop)); ++i)
     {
         const ProjEntry& e = projCache.entries[static_cast<size_t>(hits[i].idx)];
@@ -1275,6 +1348,8 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         const Vector3d rgb(e.r, e.g, e.b);
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+            normalSum += Vector3d(e.nx, e.ny, e.nz) * contrib;
         // Hit placement still uses view-forward depth (tz), even when sort key is camDist.
         depthSum += e.depth * contrib;
         depthW += contrib;
@@ -1286,6 +1361,9 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         return false;
 
     out.colour = acc;
+    out.normal = normalSum;
+    if (out.normal.lengthSqr() > EPSILON)
+        out.normal.normalize();
     out.transmittance = T;
     out.depth = (depthW > EPSILON) ? (depthSum / depthW) : hits[0].t;
     out.valid = true;
@@ -1368,6 +1446,13 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
             Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
 
             Vector3d n = -ray.Direction;
+            if (lightingMode == GaussianSplatLightingMode::Relight && seg.normal.lengthSqr() > EPSILON)
+            {
+                n = seg.normal;
+                if (dot(n, ray.Direction) > 0.0)
+                    n = -n;
+                n.normalize();
+            }
             Intersection isect(rayT, IPoint, n, this);
             isect.haveNormal = true;
             Depth_Stack->push(isect);
@@ -1409,6 +1494,16 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     Thread->GaussianSplatColour = TransColour(ToMathColour(RGBColour(rgb[X], rgb[Y], rgb[Z])), 0.0, Clamp01(1.0 - alphaOut));
 
     Vector3d n = -ray.Direction;
+    if (lightingMode == GaussianSplatLightingMode::Relight && seg.normal.lengthSqr() > EPSILON)
+    {
+        n = seg.normal;
+        if (Trans != nullptr)
+            MTransNormal(n, n, Trans);
+        if (dot(n, ray.Direction) > 0.0)
+            n = -n;
+        if (n.lengthSqr() > EPSILON)
+            n.normalize();
+    }
     Intersection isect(depth, IPoint, n, this);
     isect.haveNormal = true;
     Depth_Stack->push(isect);
@@ -1458,7 +1553,8 @@ void GaussianSplatCloud::Determine_Textures(Intersection *, bool, WeightedTextur
                 tex->Finish->Reflection_Max = MathColour(0.0);
                 tex->Finish->Reflection_Min = MathColour(0.0);
             }
-            if (tex->Finish->Emission.IsNearZero(EPSILON))
+            if (lightingMode == GaussianSplatLightingMode::Automatic &&
+                tex->Finish->Emission.IsNearZero(EPSILON))
                 tex->Finish->Emission = MathColour(0.15);
         }
         else

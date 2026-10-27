@@ -2353,6 +2353,7 @@ GAUSSIAN_SPLAT:
     "File_Name"
     [khr_ellipse]
     [sort_depth]
+    [lighting_mode khr | relight]
     [sh_degree FLOAT]
     [alpha_clamp FLOAT]
     [sigma_extent FLOAT]
@@ -2399,11 +2400,30 @@ equivalent where they evaluate to the same number.</p>
 <code>sort_depth</code> requests view-forward depth sorting for raster-host
 parity; imported KHR assets otherwise retain their authored sorting semantics.</p>
 
+<p><code>lighting_mode khr</code> is the default for
+<code>khr_ellipse</code>. It evaluates the complete configured SH degree as
+display-referred colour and ignores POV-Ray finish lighting, matching the KHR
+requirement that the referenced glTF material is ignored.
+<code>lighting_mode relight</code> instead uses SH degree 0 as the diffuse
+pigment, derives a surface normal from each splat's smallest covariance axis,
+alpha-composites those normals, and applies the scene's POV-Ray finish. This
+enables diffuse lighting, specular or Phong highlights, and reflection without
+changing ellipse projection or alpha composition. Relighting is intentionally
+opt-in because it can differ from the appearance captured by higher-degree SH
+coefficients.</p>
+
 <p class="Note"><strong>Note:</strong> The four rendering controls in the
 table are scene-level POV-Ray controls, not properties stored by the
 KHR_gaussian_splatting extension. Their defaults reproduce the practical
 Khronos Sample Viewer and RenderAssimp raster behavior while allowing a scene
 to select other quality and filtering tradeoffs explicitly.</p>
+
+<p class="Note"><strong>TODO:</strong> Add an explicit scene-level SH colour
+space setting for sources such as Postshot/Graphdeco PLY files that do not
+carry KHR <code>colorSpace</code> metadata. The setting should distinguish at
+least <code>srgb_rec709_display</code> from
+<code>lin_rec709_display</code>, while authored KHR metadata remains the
+default when present.</p>
 
 <p>Example:</p>
 <pre>
@@ -2411,6 +2431,7 @@ gaussian_splat {
   "model.ply"
   khr_ellipse
   sort_depth
+  lighting_mode relight
   sh_degree 3
   alpha_clamp 99/100
   sigma_extent 3/1

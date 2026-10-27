@@ -69,9 +69,17 @@ struct GaussianSplatBVHNode final
 struct GaussianSplatSegmentResult final
 {
     Vector3d colour;       ///< Premultiplied emission RGB along the segment.
+    Vector3d normal;       ///< Alpha/transmittance-weighted relighting normal.
     DBL transmittance;     ///< Remaining transmittance (1 - accumulated alpha).
     DBL depth;             ///< Weighted depth in world ray parameter space (caller scale).
     bool valid;            ///< True if any contribution exceeded cutoff.
+};
+
+enum class GaussianSplatLightingMode
+{
+    Automatic, ///< Legacy behavior for non-KHR clouds.
+    Khr,       ///< Full view-dependent SH, emitted without POV material lighting.
+    Relight    ///< SH degree 0 pigment with covariance normals and POV finish.
 };
 
 class GaussianSplatCloud final : public NonsolidObject
@@ -96,6 +104,7 @@ class GaussianSplatCloud final : public NonsolidObject
         int bvhLeafSize;             ///< BVH leaf size (1 = quality).
         DBL giWeight;                ///< Scale for bounce/GI segment contribution (Trace hook).
         DBL opacityScale;            ///< Multiplier on splat opacity (offline density control).
+        GaussianSplatLightingMode lightingMode;
         /// When true (or auto-detected from scene texture/interior): splat RGB feeds
         /// pigment + POV finish/IOR instead of pure emission billboards.
         bool materialShading;
@@ -143,6 +152,7 @@ class GaussianSplatCloud final : public NonsolidObject
             DBL camDist;  ///< ||mu - cam|| for KHR cameraDistance sort.
             DBL alpha;    ///< Linear opacity attribute (scaled).
             DBL r, g, b;  ///< View-dependent SH colour for this camera (pre-tonemap).
+            DBL nx, ny, nz; ///< Covariance-derived world normal for relighting.
         };
 
         /// Frame cache: project all splats once, bin into screen tiles (CSR).
@@ -189,6 +199,9 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Evaluate SH colour. @p viewDir is camera→splat in the SH/authoring frame
         /// (object space before node Trans; KHR: rotate SH / equivalently R^{-1} view).
         void EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const;
+
+        /// Evaluate the view-independent degree-0 SH colour used as relit pigment.
+        void EvalDiffuseColour(const GaussianSplatPoint& sp, Vector3d& rgb) const;
 
         /// Map world-space camera→splat direction into the SH authoring frame (applies R^{-1}).
         void ViewDirForSH(const GaussianSplatPoint& sp, const Vector3d& camToSplatWorld, Vector3d& outLocal) const;

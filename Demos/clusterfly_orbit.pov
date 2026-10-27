@@ -16,6 +16,9 @@ global_settings {
 #declare OrbitHeight = LookAt.y + 0.12;
 #declare AngleDeg    = 45.0;
 #declare Ang         = clock * 2.0 * pi;
+#ifndef (RelightSplats)
+  #declare RelightSplats = 1;
+#end
 
 camera {
   location <LookAt.x + OrbitRadius * sin(Ang), OrbitHeight,
@@ -47,6 +50,11 @@ gaussian_splat {
   "models/ClusterFlySplat/ClusterFly_M.ply"
   khr_ellipse
   sort_depth
+  #if (RelightSplats)
+    lighting_mode relight
+  #else
+    lighting_mode khr
+  #end
   sh_degree 3
   alpha_clamp 99/100  // Per-splat alpha maximum; default 0.99, range 0..1.
   sigma_extent 3/1    // Gaussian support radius in sigma; default 3, >= 0.
@@ -59,8 +67,10 @@ gaussian_splat {
       emission 0
       diffuse 0.82
       brilliance 1
-      specular 0
+      specular 0.22
+      roughness 0.035
       phong 0
+      reflection 0.04
     }
   }
   // Postshot/COLMAP Y-down -> POV Y-up: 180 about X around AABB center

@@ -317,6 +317,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { JPEG_TOKEN,                   "jpeg" },
     { JULIA_TOKEN,                  "julia" },
     { JULIA_FRACTAL_TOKEN,          "julia_fractal" },
+    { KHR_TOKEN,                    "khr" },
     { KHR_ELLIPSE_TOKEN,            "khr_ellipse" },
 
     { LAMBDA_TOKEN,                 "lambda" },
@@ -324,6 +325,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { LEMON_TOKEN,                  "lemon" },
     { LEOPARD_TOKEN,                "leopard" },
     { LIGHT_GROUP_TOKEN,            "light_group" },
+    { LIGHTING_MODE_TOKEN,          "lighting_mode" },
     { LIGHT_SOURCE_TOKEN,           "light_source" },
     { LINEAR_SPLINE_TOKEN,          "linear_spline" },
     { LINEAR_SWEEP_TOKEN,           "linear_sweep" },
@@ -480,6 +482,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { REFLECTION_TOKEN,             "reflection" },
     { REFLECTION_EXPONENT_TOKEN,    "reflection_exponent" },
     { REFRACTION_TOKEN,             "refraction" },
+    { RELIGHT_TOKEN,                "relight" },
     { RENDER_TOKEN,                 "render" },
     { REPEAT_TOKEN,                 "repeat" },
     { RGB_TOKEN,                    "rgb" },
