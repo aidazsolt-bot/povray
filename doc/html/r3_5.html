@@ -2355,6 +2355,7 @@ GAUSSIAN_SPLAT:
     [sort_depth]
     [lighting_mode khr | relight]
     [sh_degree FLOAT]
+    [sh_color_space srgb_rec709_display | lin_rec709_display]
     [alpha_clamp FLOAT]
     [sigma_extent FLOAT]
     [max_quad_frac FLOAT]
@@ -2418,12 +2419,13 @@ KHR_gaussian_splatting extension. Their defaults reproduce the practical
 Khronos Sample Viewer and RenderAssimp raster behavior while allowing a scene
 to select other quality and filtering tradeoffs explicitly.</p>
 
-<p class="Note"><strong>TODO:</strong> Add an explicit scene-level SH colour
-space setting for sources such as Postshot/Graphdeco PLY files that do not
-carry KHR <code>colorSpace</code> metadata. The setting should distinguish at
-least <code>srgb_rec709_display</code> from
-<code>lin_rec709_display</code>, while authored KHR metadata remains the
-default when present.</p>
+<p><code>sh_color_space</code> overrides the SH colour space for sources such
+as Postshot/Graphdeco PLY files that do not carry KHR
+<code>colorSpace</code> metadata. Use <code>srgb_rec709_display</code> for
+display-referred sRGB coefficients or <code>lin_rec709_display</code> for
+linear BT.709 coefficients. When this option is omitted, authored KHR metadata
+remains authoritative; metadata-less inputs retain their legacy linear
+interpretation.</p>
 
 <p>Example:</p>
 <pre>
@@ -2433,6 +2435,7 @@ gaussian_splat {
   sort_depth
   lighting_mode relight
   sh_degree 3
+  sh_color_space srgb_rec709_display
   alpha_clamp 99/100
   sigma_extent 3/1
   max_quad_frac 1/2

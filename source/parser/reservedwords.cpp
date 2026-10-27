@@ -327,6 +327,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { LIGHT_GROUP_TOKEN,            "light_group" },
     { LIGHTING_MODE_TOKEN,          "lighting_mode" },
     { LIGHT_SOURCE_TOKEN,           "light_source" },
+    { LIN_REC709_DISPLAY_TOKEN,     "lin_rec709_display" },
     { LINEAR_SPLINE_TOKEN,          "linear_spline" },
     { LINEAR_SWEEP_TOKEN,           "linear_sweep" },
     { LN_TOKEN,                     "ln" },
@@ -508,6 +509,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { SGREEN_TOKEN,                 "sgreen" },
 #endif
     { SHADOWLESS_TOKEN,             "shadowless" },
+    { SH_COLOR_SPACE_TOKEN,         "sh_color_space" },
     { SH_DEGREE_TOKEN,              "sh_degree" },
     { SINE_WAVE_TOKEN,              "sine_wave" },
     { SIN_TOKEN,                    "sin" },
@@ -537,6 +539,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { SPIRAL1_TOKEN,                "spiral1" },
     { SPIRAL2_TOKEN,                "spiral2" },
     { SPLINE_TOKEN,                 "spline" },
+    { SRGB_REC709_DISPLAY_TOKEN,    "srgb_rec709_display" },
     { SPLIT_UNION_TOKEN,            "split_union" },
     { SPOTLIGHT_TOKEN,              "spotlight" },
     { SPOTTED_TOKEN,                "spotted" },

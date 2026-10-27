@@ -56,6 +56,7 @@ gaussian_splat {
     lighting_mode khr
   #end
   sh_degree 3
+  sh_color_space srgb_rec709_display
   alpha_clamp 99/100  // Per-splat alpha maximum; default 0.99, range 0..1.
   sigma_extent 3/1    // Gaussian support radius in sigma; default 3, >= 0.
   max_quad_frac 1/2   // Max radius / min(image size); KHR default 0.5, 0 disables.

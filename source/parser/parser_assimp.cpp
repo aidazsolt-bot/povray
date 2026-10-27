@@ -1048,7 +1048,7 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
                                         bool &khrEllipse, bool &sortDepth, bool &inverseSurface, int &lightingMode,
-                                        std::string &exportMeshPath)
+                                        int &shColorSpace, std::string &exportMeshPath)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -1058,6 +1058,15 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             shDegree = static_cast<int>(Parse_Float());
             if (shDegree < 0) shDegree = 0;
             if (shDegree > 3) shDegree = 3;
+        END_CASE
+        CASE (SH_COLOR_SPACE_TOKEN)
+            Get_Token();
+            if (CurrentTrueTokenId() == SRGB_REC709_DISPLAY_TOKEN)
+                shColorSpace = 0;
+            else if (CurrentTrueTokenId() == LIN_REC709_DISPLAY_TOKEN)
+                shColorSpace = 1;
+            else
+                Expectation_Error("srgb_rec709_display or lin_rec709_display");
         END_CASE
         CASE (APPROXIMATE_TOKEN)
             approximate = true;
@@ -1183,7 +1192,7 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
                                DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity,
                                bool khrEllipse, bool sortDepth, bool inverseSurface, int lightingMode,
-                               const std::string &exportMeshPath)
+                               int shColorSpace, const std::string &exportMeshPath)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
@@ -1212,6 +1221,10 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
         cloud->lightingMode = GaussianSplatLightingMode::Khr;
     else
         cloud->lightingMode = GaussianSplatLightingMode::Automatic;
+    if (shColorSpace == 0)
+        cloud->khrColorSpace = "srgb_rec709_display";
+    else if (shColorSpace == 1)
+        cloud->khrColorSpace = "lin_rec709_display";
     cloud->inverseSurface = inverseSurface;
     cloud->exportMeshPath = exportMeshPath;
     if (sortDepth)
@@ -1379,6 +1392,7 @@ ObjectPtr Parser::Parse_Assimp()
     bool sortDepth = false;
     bool inverseSurface = false;
     int lightingMode = -1;
+    int shColorSpace = -1;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
@@ -1386,7 +1400,7 @@ ObjectPtr Parser::Parse_Assimp()
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, sortDepth, inverseSurface, lightingMode, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1396,7 +1410,7 @@ ObjectPtr Parser::Parse_Assimp()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, sortDepth, inverseSurface, lightingMode, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
     // For as_surface / inverse_surface: parse texture/interior onto the cloud first so
     // SH colours can pick up finish; inverse_surface then strips IOR on convert.
     if (asSurface || inverseSurface)
@@ -1448,6 +1462,7 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     bool sortDepth = false;
     bool inverseSurface = false;
     int lightingMode = -1;
+    int shColorSpace = -1;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
@@ -1455,7 +1470,7 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, sortDepth, inverseSurface, lightingMode, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1465,7 +1480,7 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, sortDepth, inverseSurface, lightingMode, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
     // For as_surface / inverse_surface: parse mods onto cloud first, then convert.
     if (asSurface || inverseSurface)
     {
