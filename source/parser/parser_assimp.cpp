@@ -486,6 +486,42 @@ static std::string AiStringToStd(const aiString &s)
     return std::string(s.C_Str());
 }
 
+struct GaussianMeshInstance final
+{
+    unsigned meshIndex;
+    aiMatrix4x4 transform;
+};
+
+void CollectGaussianMeshInstances(const aiNode *node, const aiMatrix4x4 &parent,
+                                  std::vector<GaussianMeshInstance> &instances)
+{
+    if (node == nullptr)
+        return;
+
+    const aiMatrix4x4 global = parent * node->mTransformation;
+    for (unsigned i = 0; i < node->mNumMeshes; ++i)
+    {
+        GaussianMeshInstance instance;
+        instance.meshIndex = node->mMeshes[i];
+        instance.transform = global;
+        instances.push_back(instance);
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i)
+        CollectGaussianMeshInstances(node->mChildren[i], global, instances);
+}
+
+TRANSFORM AssimpToPovTransform(const aiMatrix4x4 &m)
+{
+    MATRIX matrix;
+    MIdentity(matrix);
+    matrix[0][0] = m.a1; matrix[1][0] = m.a2; matrix[2][0] = m.a3; matrix[3][0] = m.a4;
+    matrix[0][1] = m.b1; matrix[1][1] = m.b2; matrix[2][1] = m.b3; matrix[3][1] = m.b4;
+    matrix[0][2] = m.c1; matrix[1][2] = m.c2; matrix[2][2] = m.c3; matrix[3][2] = m.c4;
+    TRANSFORM transform;
+    Compute_Matrix_Transform(&transform, matrix);
+    return transform;
+}
+
 ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene, DBL sphereScale, size_t maxCount, int shDegree)
 {
     GaussianSplatCloud *cloud = new GaussianSplatCloud();
@@ -493,12 +529,31 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
     size_t remaining = (maxCount > 0) ? maxCount : static_cast<size_t>(-1);
     bool metaCaptured = false;
 
-    for (unsigned mi = 0; mi < scene->mNumMeshes && remaining > 0; ++mi)
+    std::vector<GaussianMeshInstance> instances;
+    CollectGaussianMeshInstances(scene->mRootNode, aiMatrix4x4(), instances);
+    for (const GaussianMeshInstance &instance : instances)
     {
+        if (instance.meshIndex >= scene->mNumMeshes)
+            continue;
+        const aiGaussianSplat *gs = aiGetGaussianSplat(scene, instance.meshIndex);
+        if (gs != nullptr)
+            cloud->restCount = max(cloud->restCount, gs->mNumRestCoeffs);
+    }
+
+    for (const GaussianMeshInstance &instance : instances)
+    {
+        if (remaining == 0)
+            break;
+        if (instance.meshIndex >= scene->mNumMeshes)
+            continue;
+        const unsigned mi = instance.meshIndex;
         const aiMesh *mesh = scene->mMeshes[mi];
         const aiGaussianSplat *gs = aiGetGaussianSplat(scene, mi);
         if (mesh == nullptr || gs == nullptr || gs->mDC == nullptr || gs->mScale == nullptr || gs->mOpacity == nullptr)
             continue;
+
+        const unsigned transformIndex = static_cast<unsigned>(cloud->sourceTransforms.size());
+        cloud->sourceTransforms.push_back(AssimpToPovTransform(instance.transform));
 
         if (!metaCaptured)
         {
@@ -513,11 +568,9 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
                 cloud->khrSortingMethod = "cameraDistance";
             cloud->khrSortCameraDistance =
                 (cloud->khrSortingMethod == "cameraDistance");
+            cloud->restCoeffsInterleaved = !cloud->khrKernel.empty();
             metaCaptured = true;
         }
-
-        if (cloud->restCount == 0 && gs->mNumRestCoeffs > 0)
-            cloud->restCount = gs->mNumRestCoeffs;
 
         const unsigned n = min(mesh->mNumVertices, gs->mNumPoints);
         for (unsigned vi = 0; vi < n && remaining > 0; ++vi)
@@ -526,17 +579,13 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
             const aiVector3D &dc = gs->mDC[vi];
             // Assimp already converted PLY logits / log-scales to KHR linear space.
             DBL opacity = Clamp01(static_cast<DBL>(gs->mOpacity[vi]));
-            if (opacity < (1.0 / 255.0))
+            if (opacity <= 0.0)
                 continue;
 
             const aiVector3D &scl = gs->mScale[vi];
             DBL sx = max(static_cast<DBL>(scl.x), 0.0) * sphereScale;
             DBL sy = max(static_cast<DBL>(scl.y), 0.0) * sphereScale;
             DBL sz = max(static_cast<DBL>(scl.z), 0.0) * sphereScale;
-            sx = max(sx, EPSILON);
-            sy = max(sy, EPSILON);
-            sz = max(sz, EPSILON);
-
             DBL qw = 1.0, qx = 0.0, qy = 0.0, qz = 0.0;
             if (gs->mRotation != nullptr)
                 AssimpQuatToWxyz(gs->mRotation[vi], qw, qx, qy, qz);
@@ -548,11 +597,17 @@ ObjectPtr BuildGaussianSplatCloudFromAssimp(Parser *parser, const aiScene *scene
             sp.opacity = opacity;
             sp.dc = Vector3d(dc.x, dc.y, dc.z);
             sp.restOffset = static_cast<unsigned>(cloud->restCoeffs.size());
+            sp.transformIndex = transformIndex;
 
-            if (cloud->restCount > 0 && gs->mRest != nullptr)
+            if (cloud->restCount > 0)
             {
                 for (unsigned k = 0; k < cloud->restCount; ++k)
-                    cloud->restCoeffs.push_back(static_cast<DBL>(gs->mRest[vi * gs->mNumRestCoeffs + k]));
+                {
+                    const DBL value = (gs->mRest != nullptr && k < gs->mNumRestCoeffs)
+                        ? static_cast<DBL>(gs->mRest[vi * gs->mNumRestCoeffs + k])
+                        : 0.0;
+                    cloud->restCoeffs.push_back(value);
+                }
             }
             else
             {
@@ -605,8 +660,16 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
     size_t created = 0;
     size_t remaining = (maxCount > 0) ? maxCount : static_cast<size_t>(-1);
 
-    for (unsigned mi = 0; mi < scene->mNumMeshes && remaining > 0; ++mi)
+    std::vector<GaussianMeshInstance> instances;
+    CollectGaussianMeshInstances(scene->mRootNode, aiMatrix4x4(), instances);
+
+    for (const GaussianMeshInstance &instance : instances)
     {
+        if (remaining == 0)
+            break;
+        if (instance.meshIndex >= scene->mNumMeshes)
+            continue;
+        const unsigned mi = instance.meshIndex;
         const aiMesh *mesh = scene->mMeshes[mi];
         const aiGaussianSplat *gs = aiGetGaussianSplat(scene, mi);
         if (mesh == nullptr || gs == nullptr || gs->mDC == nullptr || gs->mScale == nullptr || gs->mOpacity == nullptr)
@@ -653,6 +716,8 @@ ObjectPtr BuildGaussianSplatFromAssimp(Parser *parser, const aiScene *scene, DBL
 
             Compute_Translation_Transform(&transT, Vector3d(pos.x, pos.y, pos.z));
             Compose_Transforms(&scaleT, &transT);
+            const TRANSFORM sourceTransform = AssimpToPovTransform(instance.transform);
+            Compose_Transforms(&scaleT, &sourceTransform);
 
             Transform_Object(reinterpret_cast<ObjectPtr>(sph), &scaleT);
             sph->Compute_BBox();
@@ -873,6 +938,13 @@ const aiScene *ImportAssimpScene(Parser *parser, Assimp::Importer &importer, con
     ReportAnimations(parser, probe);
 
     const bool hasGaussianSplat = aiSceneHasGaussianSplat(probe) != 0;
+    if (hasGaussianSplat)
+    {
+        // Keep node transforms and the mesh-indexed Gaussian sidecars aligned.
+        // POV-Ray applies each node-global transform during splat projection.
+        ReportAssimpBounds(parser, probe);
+        return probe;
+    }
 
     // Second pass: bake node transforms into mesh data (bind pose) for POV geometry.
     // Enable JoinIdenticalVertices only when this is not a Gaussian splat cloud.
@@ -969,7 +1041,8 @@ ObjectPtr BuildAssimpObject(Parser *parser, const std::string &sysPath, DBL sphe
 } // namespace
 
 void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
-                                        DBL &opacityCutoff, DBL &alphaStop, DBL &maxQuadFrac,
+                                        DBL &opacityCutoff, DBL &alphaStop, DBL &alphaClamp,
+                                        DBL &sigmaExtent, DBL &ewaFilter, DBL &maxQuadFrac,
                                         int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
@@ -994,7 +1067,7 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             khrEllipse = true;
             samples = 2;
             opacityCutoff = 1.0 / 255.0;
-            alphaStop = 0.999;
+            alphaStop = 1.0;
             asSurface = false;
             inverseSurface = false;
         END_CASE
@@ -1051,6 +1124,19 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             if (alphaStop < 0.0) alphaStop = 0.0;
             if (alphaStop > 1.0) alphaStop = 1.0;
         END_CASE
+        CASE (ALPHA_CLAMP_TOKEN)
+            alphaClamp = Parse_Float();
+            if (alphaClamp < 0.0) alphaClamp = 0.0;
+            if (alphaClamp > 1.0) alphaClamp = 1.0;
+        END_CASE
+        CASE (SIGMA_EXTENT_TOKEN)
+            sigmaExtent = Parse_Float();
+            if (sigmaExtent < 0.0) sigmaExtent = 0.0;
+        END_CASE
+        CASE (EWA_FILTER_TOKEN)
+            ewaFilter = Parse_Float();
+            if (ewaFilter < 0.0) ewaFilter = 0.0;
+        END_CASE
         CASE (MAX_QUAD_FRAC_TOKEN)
             // Sample Viewer huge-quad cull: skip if max(3*sqrt(cov)) > frac*min(W,H).
             // 0 = off; 0.5 = Khronos / glTF Sample Viewer default.
@@ -1081,7 +1167,8 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
 namespace
 {
 
-void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, DBL maxQuadFrac,
+void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, DBL alphaClamp,
+                               DBL sigmaExtent, DBL ewaFilter, DBL maxQuadFrac,
                                int samples, int maxHits, DBL giWeight,
                                bool asSurface, bool surfaceSmooth, bool filterFloaters,
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
@@ -1094,7 +1181,10 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
         return;
     cloud->opacityCutoff = opacityCutoff;
     cloud->alphaStop = alphaStop;
-    cloud->maxQuadFrac = maxQuadFrac;
+    cloud->alphaClamp = alphaClamp;
+    cloud->sigmaExtent = sigmaExtent;
+    cloud->ewaFilter = ewaFilter;
+    cloud->maxQuadFrac = (maxQuadFrac >= 0.0) ? maxQuadFrac : (khrEllipse ? 0.5 : 0.0);
     cloud->samples = samples;
     cloud->maxHits = maxHits;
     cloud->giWeight = giWeight;
@@ -1255,7 +1345,10 @@ ObjectPtr Parser::Parse_Assimp()
     int shDegree = 3;
     DBL opacityCutoff = 1.0 / 255.0;
     DBL alphaStop = 0.999;
-    DBL maxQuadFrac = 0.0;
+    DBL alphaClamp = 0.99;
+    DBL sigmaExtent = 3.0;
+    DBL ewaFilter = 0.3;
+    DBL maxQuadFrac = -1.0;
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
@@ -1272,7 +1365,8 @@ ObjectPtr Parser::Parse_Assimp()
     bool inverseSurface = false;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
+                               opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
+                               maxQuadFrac, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
@@ -1281,7 +1375,8 @@ ObjectPtr Parser::Parse_Assimp()
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
+                              maxQuadFrac, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
@@ -1318,7 +1413,10 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     int shDegree = 3;
     DBL opacityCutoff = 1.0 / 255.0;
     DBL alphaStop = 0.999;
-    DBL maxQuadFrac = 0.0;
+    DBL alphaClamp = 0.99;
+    DBL sigmaExtent = 3.0;
+    DBL ewaFilter = 0.3;
+    DBL maxQuadFrac = -1.0;
     int samples = 4;
     int maxHits = 0;
     DBL giWeight = 1.0;
@@ -1335,7 +1433,8 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     bool inverseSurface = false;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
-                               opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
+                               opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
+                               maxQuadFrac, samples, maxHits, giWeight,
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
@@ -1344,7 +1443,8 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
     POV_FREE(fileName);
-    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, maxQuadFrac, samples, maxHits, giWeight,
+    ApplyGaussianSplatQuality(result, opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
+                              maxQuadFrac, samples, maxHits, giWeight,
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,

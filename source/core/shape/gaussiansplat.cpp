@@ -61,11 +61,8 @@ const DBL kDepthTolerance = 1.0e-6;
 const DBL kWeightEps = 1.0e-4;
 const int kDefaultMaxHits = 65536;
 const int kHardMaxHits = 262144;
-const DBL kExtentSigma = 3.0;
 /// SuperSplat quad edge at UV=1 => mahalanobis^2 = 8 (2*sqrt(2) sigma); soft cull only.
 const DBL kProjPowerCullSuperSplat = 8.0;
-/// KHR ellipse kernel: 3-sigma cutoff => mahalanobis^2 <= 9.
-const DBL kProjPowerCullKhr = 9.0;
 const int kProjTileSize = 16;
 /// Veiled-baseline: no min/max pixel / floater culls (those came after the
 /// "verschleiert" feedback). Extent still used for tile coverage.
@@ -91,6 +88,12 @@ inline Vector3d TonemapSplatRgb(const Vector3d& c)
         (c[Z] <= 1.0) ? Clamp01(c[Z]) : (1.0 - 1.0 / (1.0 + c[Z])));
 }
 
+inline DBL SrgbToLinear(DBL c)
+{
+    c = Clamp01(c);
+    return (c <= 0.04045) ? (c / 12.92) : std::pow((c + 0.055) / 1.055, 2.4);
+}
+
 void QuatToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
 {
     DBL n = std::sqrt(w * w + x * x + y * y + z * z);
@@ -106,20 +109,21 @@ void QuatToMatrix(DBL w, DBL x, DBL y, DBL z, MATRIX out)
     out[0][2] = 2 * (x * z + y * w);
     out[1][0] = 2 * (x * y + z * w);
     out[1][1] = 1 - 2 * (x * x + z * z);
-    out[1][2] = 2 * (y * z + x * w);
+    out[1][2] = 2 * (y * z - x * w);
     out[2][0] = 2 * (x * z - y * w);
     out[2][1] = 2 * (y * z + x * w);
     out[2][2] = 1 - 2 * (x * x + y * y);
 }
 
 /// Build Sigma = R * diag(s^2) * R^T in object space (KHR C C^T with C = R S).
-void BuildSigmaObject(const GaussianSplatPoint& sp, DBL Sigma[3][3])
+void BuildSigmaObject(const GaussianSplatPoint& sp, DBL Sigma[3][3], bool preserveZeroScale)
 {
     MATRIX Rmat;
     QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
-    const DBL sx = std::max(sp.scale[X], EPSILON);
-    const DBL sy = std::max(sp.scale[Y], EPSILON);
-    const DBL sz = std::max(sp.scale[Z], EPSILON);
+    const DBL minScale = preserveZeroScale ? 0.0 : EPSILON;
+    const DBL sx = std::max(sp.scale[X], minScale);
+    const DBL sy = std::max(sp.scale[Y], minScale);
+    const DBL sz = std::max(sp.scale[Z], minScale);
     const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
     for (int i = 0; i < 3; ++i)
     {
@@ -168,17 +172,39 @@ void TransformCovariance(DBL Sigma[3][3], const TRANSFORM *Trans)
     }
 }
 
-void SplatWorldAABB(const GaussianSplatPoint& sp, Vector3d& bmin, Vector3d& bmax)
+void InverseRotationDirection(Vector3d& result, const Vector3d& direction, const TRANSFORM *transform)
 {
-    MATRIX R;
-    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, R);
-    // Conservative AABB: 3-sigma extent of oriented ellipsoid axes projected to world axes.
-    Vector3d ext(
-        kExtentSigma * (std::fabs(R[0][0]) * sp.scale[X] + std::fabs(R[0][1]) * sp.scale[Y] + std::fabs(R[0][2]) * sp.scale[Z]),
-        kExtentSigma * (std::fabs(R[1][0]) * sp.scale[X] + std::fabs(R[1][1]) * sp.scale[Y] + std::fabs(R[1][2]) * sp.scale[Z]),
-        kExtentSigma * (std::fabs(R[2][0]) * sp.scale[X] + std::fabs(R[2][1]) * sp.scale[Y] + std::fabs(R[2][2]) * sp.scale[Z]));
-    bmin = sp.position - ext;
-    bmax = sp.position + ext;
+    if (transform == nullptr)
+    {
+        result = direction;
+        return;
+    }
+
+    Vector3d axisX(transform->matrix[0][0], transform->matrix[0][1], transform->matrix[0][2]);
+    Vector3d axisY(transform->matrix[1][0], transform->matrix[1][1], transform->matrix[1][2]);
+    Vector3d axisZ(transform->matrix[2][0], transform->matrix[2][1], transform->matrix[2][2]);
+    if (axisX.lengthSqr() > EPSILON) axisX.normalize();
+    if (axisY.lengthSqr() > EPSILON) axisY.normalize();
+    if (axisZ.lengthSqr() > EPSILON) axisZ.normalize();
+    result = Vector3d(dot(direction, axisX), dot(direction, axisY), dot(direction, axisZ));
+}
+
+void SplatWorldAABB(const GaussianSplatPoint& sp, const TRANSFORM *sourceTransform,
+                    DBL sigmaExtent, Vector3d& bmin, Vector3d& bmax)
+{
+    Vector3d center = sp.position;
+    if (sourceTransform != nullptr)
+        MTransPoint(center, sp.position, sourceTransform);
+
+    DBL sigma[3][3];
+    BuildSigmaObject(sp, sigma, true);
+    TransformCovariance(sigma, sourceTransform);
+    const Vector3d ext(
+        sigmaExtent * std::sqrt(std::max(0.0, sigma[0][0])),
+        sigmaExtent * std::sqrt(std::max(0.0, sigma[1][1])),
+        sigmaExtent * std::sqrt(std::max(0.0, sigma[2][2])));
+    bmin = center - ext;
+    bmax = center + ext;
 }
 
 TEXTURE *EnsureThreadSplatTexture(TraceThreadData *Thread)
@@ -207,9 +233,13 @@ TEXTURE *EnsureThreadSplatTexture(TraceThreadData *Thread)
 GaussianSplatCloud::GaussianSplatCloud() :
     NonsolidObject(GAUSSIAN_SPLAT_OBJECT),
     restCount(0),
+    restCoeffsInterleaved(false),
     shDegree(3),
     opacityCutoff(1.0 / 255.0),
     alphaStop(0.999),
+    alphaClamp(0.99),
+    sigmaExtent(3.0),
+    ewaFilter(0.3),
     maxQuadFrac(0.0),
     samples(4),
     maxHits(0),
@@ -247,11 +277,16 @@ ObjectPtr GaussianSplatCloud::Copy()
     GaussianSplatCloud *New = new GaussianSplatCloud();
     Destroy_Transform(New->Trans);
     New->points = points;
+    New->sourceTransforms = sourceTransforms;
     New->restCoeffs = restCoeffs;
     New->restCount = restCount;
+    New->restCoeffsInterleaved = restCoeffsInterleaved;
     New->shDegree = shDegree;
     New->opacityCutoff = opacityCutoff;
     New->alphaStop = alphaStop;
+    New->alphaClamp = alphaClamp;
+    New->sigmaExtent = sigmaExtent;
+    New->ewaFilter = ewaFilter;
     New->maxQuadFrac = maxQuadFrac;
     New->samples = samples;
     New->maxHits = maxHits;
@@ -403,7 +438,10 @@ void GaussianSplatCloud::BuildBVHRecursive(int nodeIndex, int begin, int end, in
     for (int i = begin; i < end; ++i)
     {
         Vector3d smin, smax;
-        SplatWorldAABB(points[static_cast<size_t>(bvhOrder[static_cast<size_t>(i)])], smin, smax);
+        const GaussianSplatPoint& point = points[static_cast<size_t>(bvhOrder[static_cast<size_t>(i)])];
+        const TRANSFORM *sourceTransform =
+            (point.transformIndex < sourceTransforms.size()) ? &sourceTransforms[point.transformIndex] : nullptr;
+        SplatWorldAABB(point, sourceTransform, sigmaExtent, smin, smax);
         bmin = Vector3d(std::min(bmin[X], smin[X]), std::min(bmin[Y], smin[Y]), std::min(bmin[Z], smin[Z]));
         bmax = Vector3d(std::max(bmax[X], smax[X]), std::max(bmax[Y], smax[Y]), std::max(bmax[Z], smax[Z]));
     }
@@ -570,8 +608,8 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             const DBL fx = proj->fx, fy = proj->fy;
             const DBL invZ = 1.0 / tz;
             const DBL invZ2 = invZ * invZ;
-            const DBL J00 = fx * invZ, J02 = fx * tx * invZ2;
-            const DBL J11 = fy * invZ, J12 = fy * ty * invZ2;
+            const DBL J00 = fx * invZ, J02 = -fx * tx * invZ2;
+            const DBL J11 = fy * invZ, J12 = -fy * ty * invZ2;
 
             // cov2d = J * Σ_cam * Jᵀ  (2x2). Kerbl +0.3px low-pass is NOT in KHR.
             auto Sj = [&](int row, int colJ) -> DBL {
@@ -585,8 +623,8 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             DBL cov11 = J11 * Sj(1, 1) + J12 * Sj(2, 1);
             if (!khrEllipse)
             {
-                cov00 += 0.3;
-                cov11 += 0.3;
+                cov00 += ewaFilter;
+                cov11 += ewaFilter;
             }
 
             const DBL det = cov00 * cov11 - cov01 * cov01;
@@ -598,7 +636,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             const DBL du = proj->screenU - meanU;
             const DBL dv = proj->screenV - meanV;
             const DBL power = (cov11 * du * du - 2.0 * cov01 * du * dv + cov00 * dv * dv) / det;
-            const DBL powerCull = khrEllipse ? kProjPowerCullKhr : (kExtentSigma * kExtentSigma);
+            const DBL powerCull = khrEllipse ? (sigmaExtent * sigmaExtent) : kProjPowerCullSuperSplat;
             if (power > powerCull)
                 return false;
 
@@ -645,7 +683,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
         const DBL du = dot(delta, u);
         const DBL dv = dot(delta, v);
         const DBL power = (a11 * du * du - 2.0 * a01 * du * dv + a00 * dv * dv) / det;
-        const DBL powerCull = khrEllipse ? kProjPowerCullKhr : (kExtentSigma * kExtentSigma);
+        const DBL powerCull = khrEllipse ? (sigmaExtent * sigmaExtent) : kProjPowerCullSuperSplat;
         if (power > powerCull)
             return false;
 
@@ -667,7 +705,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
 
         tHit = -dot(oL, dL) / a; // γ
         const DBL beta = 1.0 / std::sqrt(a);
-        if (tHit < (tSeg0 - kExtentSigma * beta) || tHit > (tSeg1 + kExtentSigma * beta))
+        if (tHit < (tSeg0 - sigmaExtent * beta) || tHit > (tSeg1 + sigmaExtent * beta))
             return false;
 
         const Vector3d closest = oL + dL * tHit;
@@ -676,8 +714,8 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             return false;
 
         const DBL invSigma = 1.0 / (beta * std::sqrt(2.0));
-        const DBL tLo = std::max(tSeg0, tHit - kExtentSigma * beta);
-        const DBL tHi = std::min(tSeg1, tHit + kExtentSigma * beta);
+        const DBL tLo = std::max(tSeg0, tHit - sigmaExtent * beta);
+        const DBL tHi = std::min(tSeg1, tHit + sigmaExtent * beta);
         if (tHi <= tLo)
             return false;
         const DBL erfHi = std::erf((tHi - tHit) * invSigma);
@@ -695,24 +733,23 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
     }
 }
 
-void GaussianSplatCloud::ViewDirForSH(const Vector3d& camToSplatWorld, Vector3d& outLocal) const
+void GaussianSplatCloud::ViewDirForSH(const GaussianSplatPoint& sp,
+                                      const Vector3d& camToSplatWorld, Vector3d& outLocal) const
 {
     // KHR: SH coefficients SHOULD be transformed by the node rotation. Equivalent:
     // evaluate SH with R^{-1} * viewDir (authoring / pre-Trans frame).
     if (Trans != nullptr)
     {
-        MInvTransDirection(outLocal, camToSplatWorld, Trans);
-        if (outLocal.lengthSqr() > EPSILON)
-            outLocal.normalize();
-        else
-            outLocal = camToSplatWorld.normalized();
+        InverseRotationDirection(outLocal, camToSplatWorld, Trans);
     }
     else
     {
         outLocal = camToSplatWorld;
-        if (outLocal.lengthSqr() > EPSILON)
-            outLocal.normalize();
     }
+    if (sp.transformIndex < sourceTransforms.size())
+        InverseRotationDirection(outLocal, outLocal, &sourceTransforms[sp.transformIndex]);
+    if (outLocal.lengthSqr() > EPSILON)
+        outLocal.normalize();
 }
 
 void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const
@@ -734,13 +771,15 @@ void GaussianSplatCloud::EvalColour(const GaussianSplatPoint& sp, const Vector3d
     }
 
     const DBL *rest = &restCoeffs[sp.restOffset];
-    // Inria / SuperSplat PLY: f_rest is channel-major — all R bands, then G, then B.
-    // numBands = restCount/3 (3 / 8 / 15 for degree 1 / 2 / 3).
+    // KHR sidecars are coefficient-major RGB; legacy graphdeco PLY sidecars are
+    // channel-major (all R bands, then G, then B).
     const unsigned numBands = restCount / 3;
     auto band = [&](int b, int c) -> DBL {
         if (b < 0 || static_cast<unsigned>(b) >= numBands || c < 0 || c > 2)
             return 0.0;
-        const unsigned idx = static_cast<unsigned>(c) * numBands + static_cast<unsigned>(b);
+        const unsigned idx = restCoeffsInterleaved
+            ? static_cast<unsigned>(b) * 3u + static_cast<unsigned>(c)
+            : static_cast<unsigned>(c) * numBands + static_cast<unsigned>(b);
         return (idx < restCount) ? rest[idx] : 0.0;
     };
 
@@ -912,7 +951,7 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
         else
             camToSplat = -viewDir;
         Vector3d shDir;
-        ViewDirForSH(camToSplat, shDir);
+        ViewDirForSH(spoint, camToSplat, shDir);
         EvalColour(spoint, shDir, rgb);
         acc += rgb * (alpha * T);
         const DBL contrib = alpha * T;
@@ -980,19 +1019,25 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
     projCache.entries.reserve(points.size());
 
     DBL minU = BOUND_HUGE, maxU = -BOUND_HUGE, minV = BOUND_HUGE, maxV = -BOUND_HUGE;
-    std::vector<DBL> extents;
-    extents.reserve(points.size());
+    std::vector<DBL> projectedExtentsU;
+    std::vector<DBL> projectedExtentsV;
+    projectedExtentsU.reserve(points.size());
+    projectedExtentsV.reserve(points.size());
 
     for (size_t pi = 0; pi < points.size(); ++pi)
     {
         const GaussianSplatPoint& sp = points[pi];
         const DBL opac = Clamp01(sp.opacity * opacityScale);
-        if (opac < opacityCutoff)
+        if (opac <= 0.0 || opac <= opacityCutoff)
             continue;
 
         Vector3d pos = sp.position;
+        const TRANSFORM *sourceTransform =
+            (sp.transformIndex < sourceTransforms.size()) ? &sourceTransforms[sp.transformIndex] : nullptr;
+        if (sourceTransform != nullptr)
+            MTransPoint(pos, pos, sourceTransform);
         if (Trans != nullptr)
-            MTransPoint(pos, sp.position, Trans);
+            MTransPoint(pos, pos, Trans);
 
         const Vector3d rel = pos - cam.origin;
         const DBL tx = dot(rel, cam.right);
@@ -1002,7 +1047,8 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
             continue;
 
         DBL SigmaW[3][3];
-        BuildSigmaObject(sp, SigmaW);
+        BuildSigmaObject(sp, SigmaW, khrEllipse);
+        TransformCovariance(SigmaW, sourceTransform);
         // KHR: Sigma = M C C^T M^T (also required whenever Trans rotates/scales).
         TransformCovariance(SigmaW, Trans);
 
@@ -1027,8 +1073,8 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
 
         const DBL invZ = 1.0 / tz;
         const DBL invZ2 = invZ * invZ;
-        const DBL jx0 = cam.fx * invZ, jx2 = cam.fx * tx * invZ2;
-        const DBL jy1 = cam.fy * invZ, jy2 = cam.fy * ty * invZ2;
+        const DBL jx0 = cam.fx * invZ, jx2 = -cam.fx * tx * invZ2;
+        const DBL jy1 = cam.fy * invZ, jy2 = -cam.fy * ty * invZ2;
 
         auto Sj = [&](int row, int colJ) -> DBL {
             if (colJ == 0)
@@ -1038,34 +1084,26 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         DBL cov00 = jx0 * Sj(0, 0) + jx2 * Sj(2, 0);
         DBL cov01 = jx0 * Sj(0, 1) + jx2 * Sj(2, 1);
         DBL cov11 = jy1 * Sj(1, 1) + jy2 * Sj(2, 1);
-        // Kerbl screen-space low-pass; omitted for KHR ellipse fidelity.
-        if (!khrEllipse)
-        {
-            cov00 += 0.3;
-            cov11 += 0.3;
-        }
+        // Khronos Sample Viewer EWA low-pass.
+        cov00 += ewaFilter;
+        cov11 += ewaFilter;
         const DBL det = cov00 * cov11 - cov01 * cov01;
-        if (det <= EPSILON)
+        if (!std::isfinite(det) || det <= (khrEllipse ? 0.0 : EPSILON))
             continue;
 
         // Sample Viewer / khronos.vert: discard huge projected quads
         // (max(3*sqrt(a), 3*sqrt(c)) > max_quad_frac * min(W,H)). 0 = off.
         if (maxQuadFrac > EPSILON && cam.screenW > EPSILON && cam.screenH > EPSILON)
         {
-            const DBL quadW = kExtentSigma * std::sqrt(std::max(0.0, cov00));
-            const DBL quadH = kExtentSigma * std::sqrt(std::max(0.0, cov11));
+            const DBL quadW = sigmaExtent * std::sqrt(std::max(0.0, cov00));
+            const DBL quadH = sigmaExtent * std::sqrt(std::max(0.0, cov11));
             const DBL minScreen = std::min(cam.screenW, cam.screenH);
             if (std::max(quadW, quadH) > maxQuadFrac * minScreen)
                 continue;
         }
 
-        const DBL mid = 0.5 * (cov00 + cov11);
-        const DBL rad = std::sqrt(std::max(0.0, 0.25 * (cov00 - cov11) * (cov00 - cov11) + cov01 * cov01));
-        const DBL lambda1 = mid + rad;
-        const DBL lambda2 = std::max(mid - rad, 0.1);
-        const DBL len1 = 2.0 * std::sqrt(2.0 * lambda1);
-        const DBL len2 = 2.0 * std::sqrt(2.0 * lambda2);
-        const DBL extent = len1 + len2;
+        const DBL extentU = sigmaExtent * std::sqrt(std::max(0.0, cov00));
+        const DBL extentV = sigmaExtent * std::sqrt(std::max(0.0, cov11));
 
         const DBL meanU = cam.fx * tx * invZ;
         const DBL meanV = cam.fy * ty * invZ;
@@ -1074,7 +1112,7 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         Vector3d camToSplat = rel;
         camToSplat.normalize();
         Vector3d shDir;
-        ViewDirForSH(camToSplat, shDir);
+        ViewDirForSH(sp, camToSplat, shDir);
         EvalColour(sp, shDir, rgb);
         // KHR: blend in float, tonemap/clamp after composition. Legacy path tonemaps early.
         if (!khrEllipse)
@@ -1093,12 +1131,13 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
         e.g = rgb[Y];
         e.b = rgb[Z];
         projCache.entries.push_back(e);
-        extents.push_back(extent);
+        projectedExtentsU.push_back(extentU);
+        projectedExtentsV.push_back(extentV);
 
-        minU = std::min(minU, meanU - extent);
-        maxU = std::max(maxU, meanU + extent);
-        minV = std::min(minV, meanV - extent);
-        maxV = std::max(maxV, meanV + extent);
+        minU = std::min(minU, meanU - extentU);
+        maxU = std::max(maxU, meanU + extentU);
+        minV = std::min(minV, meanV - extentV);
+        maxV = std::max(maxV, meanV + extentV);
     }
 
     if (projCache.entries.empty())
@@ -1122,11 +1161,12 @@ void GaussianSplatCloud::BuildProjectedCache(const GaussianSplatCamBasis& cam) c
     for (size_t i = 0; i < projCache.entries.size(); ++i)
     {
         const ProjEntry& e = projCache.entries[i];
-        const DBL ext = extents[i];
-        const int x0 = std::max(0, static_cast<int>(std::floor((e.meanU - ext - minU) / kProjTileSize)));
-        const int x1 = std::min(projCache.tilesX - 1, static_cast<int>(std::floor((e.meanU + ext - minU) / kProjTileSize)));
-        const int y0 = std::max(0, static_cast<int>(std::floor((e.meanV - ext - minV) / kProjTileSize)));
-        const int y1 = std::min(projCache.tilesY - 1, static_cast<int>(std::floor((e.meanV + ext - minV) / kProjTileSize)));
+        const DBL extentU = projectedExtentsU[i];
+        const DBL extentV = projectedExtentsV[i];
+        const int x0 = std::max(0, static_cast<int>(std::floor((e.meanU - extentU - minU) / kProjTileSize)));
+        const int x1 = std::min(projCache.tilesX - 1, static_cast<int>(std::floor((e.meanU + extentU - minU) / kProjTileSize)));
+        const int y0 = std::max(0, static_cast<int>(std::floor((e.meanV - extentV - minV) / kProjTileSize)));
+        const int y1 = std::min(projCache.tilesY - 1, static_cast<int>(std::floor((e.meanV + extentV - minV) / kProjTileSize)));
         for (int ty = y0; ty <= y1; ++ty)
             for (int tx = x0; tx <= x1; ++tx)
                 buckets[static_cast<size_t>(ty * projCache.tilesX + tx)].push_back(static_cast<int>(i));
@@ -1178,7 +1218,9 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
 
     std::vector<TraceThreadData::GaussianSplatHitRec>& hits = Thread->GaussianSplatHits;
     hits.clear();
-    const int hitCap = std::min(kHardMaxHits, (maxHits > 0) ? maxHits : kDefaultMaxHits);
+    const int hitCap = khrEllipse
+        ? (end - begin)
+        : std::min(kHardMaxHits, (maxHits > 0) ? maxHits : kDefaultMaxHits);
     hits.reserve(static_cast<size_t>(std::min(end - begin, hitCap)));
 
     for (int ii = begin; ii < end && static_cast<int>(hits.size()) < hitCap; ++ii)
@@ -1191,12 +1233,12 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
         if (det <= EPSILON)
             continue;
         const DBL power = (e.cov11 * du * du - 2.0 * e.cov01 * du * dv + e.cov00 * dv * dv) / det;
-        const DBL powerCull = khrEllipse ? kProjPowerCullKhr : kProjPowerCullSuperSplat;
+        const DBL powerCull = khrEllipse ? (sigmaExtent * sigmaExtent) : kProjPowerCullSuperSplat;
         if (power > powerCull)
             continue;
         const DBL g = GaussPower(power);
-        const DBL alpha = Clamp01(e.alpha * g);
-        if (alpha < opacityCutoff)
+        const DBL alpha = std::min(alphaClamp, Clamp01(e.alpha * g));
+        if (alpha <= 0.0 || alpha < opacityCutoff)
             continue;
         TraceThreadData::GaussianSplatHitRec rec;
         // KHR default sortingMethod cameraDistance; legacy Kerbl uses view-forward depth.
@@ -1226,7 +1268,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
     DBL T = 1.0;
     DBL depthSum = 0.0;
     DBL depthW = 0.0;
-    for (size_t i = 0; i < hits.size() && T > (1.0 - alphaStop); ++i)
+    for (size_t i = 0; i < hits.size() && (khrEllipse || T > (1.0 - alphaStop)); ++i)
     {
         const ProjEntry& e = projCache.entries[static_cast<size_t>(hits[i].idx)];
         const DBL alpha = hits[i].w;
@@ -1240,7 +1282,7 @@ bool GaussianSplatCloud::CompositeProjectedPixel(DBL screenU, DBL screenV,
     }
 
     const DBL alphaOut = Clamp01(1.0 - T);
-    if (alphaOut < opacityCutoff)
+    if (alphaOut <= 0.0 || (!khrEllipse && alphaOut < opacityCutoff))
         return false;
 
     out.colour = acc;
@@ -1314,7 +1356,11 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
                 rgb /= alphaOut;
             // KHR: C clamped or tonemapped after float blend (display-referred).
             if (khrEllipse)
+            {
                 rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+                if (khrColorSpace == "srgb_rec709_display")
+                    rgb = Vector3d(SrgbToLinear(rgb[X]), SrgbToLinear(rgb[Y]), SrgbToLinear(rgb[Z]));
+            }
             else
                 rgb = TonemapSplatRgb(rgb);
 
@@ -1351,7 +1397,11 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
     if (alphaOut > EPSILON)
         rgb /= alphaOut;
     if (khrEllipse)
+    {
         rgb = Vector3d(Clamp01(rgb[X]), Clamp01(rgb[Y]), Clamp01(rgb[Z]));
+        if (khrColorSpace == "srgb_rec709_display")
+            rgb = Vector3d(SrgbToLinear(rgb[X]), SrgbToLinear(rgb[Y]), SrgbToLinear(rgb[Z]));
+    }
     else
         rgb = TonemapSplatRgb(rgb);
 

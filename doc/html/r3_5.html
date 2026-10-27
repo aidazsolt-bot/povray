@@ -123,6 +123,9 @@
   <td><div class="divh4"><a title="3.5.1.2.7" href="#r3_5_1_2_7">Smooth Triangle</a></div></td>
 </tr>
 <tr>
+  <td><div class="divh4"><a title="3.5.1.2.8" href="#r3_5_1_2_8">Gaussian Splat</a></div></td>
+</tr>
+<tr>
   <td><div class="divh3"><a title="3.5.1.3" href="#r3_5_1_3">Infinite Solid Primitives</a></div></td>
 </tr>
 <tr>
@@ -1861,7 +1864,7 @@ sticking through the hole.</p>
 <a name="r3_5_1_2"></a>
 <div class="content-level-h4" contains="Finite Patch Primitives" id="r3_5_1_2">
 <h4>3.5.1.2 Finite Patch Primitives</h4>
-<p>There are six totally thin, finite objects which have no well-defined inside. They are <a href="r3_5.html#r3_5_1_2_1">bicubic patch</a>, <a href="r3_5.html#r3_5_1_2_2">disc</a>, <a href="r3_5.html#r3_5_1_2_7">smooth triangle</a>, <a href="r3_5.html#r3_5_1_2_6">triangle</a>, <a href="r3_5.html#r3_5_1_2_5">polygon</a>, <a href="r3_5.html#r3_5_1_2_3">mesh</a>, and <a href="r3_5.html#r3_5_1_2_4">mesh2</a>. They may be combined in CSG union, but cannot be used inside a <code>clipped_by</code> statement.</p>
+<p>The totally thin, finite objects with no well-defined inside include <a href="r3_5.html#r3_5_1_2_1">bicubic patch</a>, <a href="r3_5.html#r3_5_1_2_2">disc</a>, <a href="r3_5.html#r3_5_1_2_7">smooth triangle</a>, <a href="r3_5.html#r3_5_1_2_6">triangle</a>, <a href="r3_5.html#r3_5_1_2_5">polygon</a>, <a href="r3_5.html#r3_5_1_2_3">mesh</a>, <a href="r3_5.html#r3_5_1_2_4">mesh2</a>, and <a href="r3_5.html#r3_5_1_2_8">Gaussian splat</a>. They may be combined in CSG union, but cannot be used inside a <code>clipped_by</code> statement.</p>
 <p class="Note"><strong>Note:</strong> Patch objects <em>may</em> give unexpected results when used in differences and intersections.</p>
 <p>These conditions apply:</p>
 <ol>
@@ -2331,6 +2334,91 @@ that point.</p>
 The <code>mesh</code> object is a way to combine many <code>triangle</code>
 and <code>smooth_triangle</code> objects together in a very efficient way.
 See <a href="r3_5.html#r3_5_1_2_3">Mesh</a> for details.</p></div>
+
+<div class="content-level-h5" contains="Gaussian Splat" id="r3_5_1_2_8">
+<h5>3.5.1.2.8 Gaussian Splat</h5>
+
+<p>The experimental <code>gaussian_splat</code> object imports Gaussian
+splat data through Assimp. The <code>khr_ellipse</code> mode projects the
+3D covariance to a screen-space ellipse and composites premultiplied alpha
+in the manner described by the Khronos
+<a href="https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_gaussian_splatting/README.md">KHR_gaussian_splatting specification</a>.
+The specification is the reference for covariance, quaternion, spherical
+harmonic, projection, sorting, and compositing semantics.</p>
+
+<p>The syntax relevant to KHR ellipse rendering is:</p>
+<pre>
+GAUSSIAN_SPLAT:
+  gaussian_splat {
+    "File_Name"
+    [khr_ellipse]
+    [sort_depth]
+    [sh_degree FLOAT]
+    [alpha_clamp FLOAT]
+    [sigma_extent FLOAT]
+    [max_quad_frac FLOAT]
+    [ewa_filter FLOAT]
+    [OBJECT_MODIFIER...]
+    }
+</pre>
+
+<p>All numeric values use the normal POV-Ray float-expression parser.
+Consequently, decimal values and arithmetic expressions such as
+<code>0.99</code>, <code>99/100</code>, and <code>3/10</code> are
+equivalent where they evaluate to the same number.</p>
+
+<table class="centered" cellpadding="4" cellspacing="1">
+<tr>
+  <th>Option</th>
+  <th>Default</th>
+  <th>Description</th>
+</tr>
+<tr>
+  <td><code>alpha_clamp</code></td>
+  <td><code>0.99</code></td>
+  <td>Maximum alpha contributed by one projected splat. Values are clamped to the range 0 through 1. An explicitly supplied value overrides the default.</td>
+</tr>
+<tr>
+  <td><code>sigma_extent</code></td>
+  <td><code>3.0</code></td>
+  <td>Gaussian support radius in standard deviations. It controls projected ellipse extent and the corresponding support bounds. Negative values are clamped to 0.</td>
+</tr>
+<tr>
+  <td><code>max_quad_frac</code></td>
+  <td><code>0.5</code> with <code>khr_ellipse</code>; otherwise <code>0</code></td>
+  <td>Rejects a projected splat when its maximum radius exceeds this fraction of the smaller image dimension. An explicit value of <code>0</code> disables this large-quad cull and is distinct from omitting the option.</td>
+</tr>
+<tr>
+  <td><code>ewa_filter</code></td>
+  <td><code>0.3</code></td>
+  <td>Screen-space EWA low-pass regularizer added to the diagonal of the projected covariance. Negative values are clamped to 0; <code>0</code> disables the regularizer.</td>
+</tr>
+</table>
+
+<p><code>sh_degree</code> selects spherical harmonic degree 0 through 3.
+<code>sort_depth</code> requests view-forward depth sorting for raster-host
+parity; imported KHR assets otherwise retain their authored sorting semantics.</p>
+
+<p class="Note"><strong>Note:</strong> The four rendering controls in the
+table are scene-level POV-Ray controls, not properties stored by the
+KHR_gaussian_splatting extension. Their defaults reproduce the practical
+Khronos Sample Viewer and RenderAssimp raster behavior while allowing a scene
+to select other quality and filtering tradeoffs explicitly.</p>
+
+<p>Example:</p>
+<pre>
+gaussian_splat {
+  "model.ply"
+  khr_ellipse
+  sort_depth
+  sh_degree 3
+  alpha_clamp 99/100
+  sigma_extent 3/1
+  max_quad_frac 1/2
+  ewa_filter 3/10
+}
+</pre>
+</div>
 
 <a name="r3_5_1_3"></a>
 <div class="content-level-h4" contains="Infinite Solid Primitives" id="r3_5_1_3">

@@ -52,6 +52,7 @@ struct GaussianSplatPoint final
     DBL opacity;         ///< KHR linear opacity in [0,1].
     Vector3d dc;         ///< SH degree-0 coeffs (SH_DEGREE_0_COEF_0 / f_dc_*).
     unsigned restOffset; ///< Index into restCoeffs (restCount entries).
+    unsigned transformIndex; ///< Per-node Assimp transform, or UINT_MAX.
 };
 
 struct GaussianSplatBVHNode final
@@ -77,12 +78,17 @@ class GaussianSplatCloud final : public NonsolidObject
 {
     public:
         std::vector<GaussianSplatPoint> points;
+        std::vector<TRANSFORM> sourceTransforms; ///< glTF node-global transforms referenced by points.
         std::vector<DBL> restCoeffs; ///< Per-point blocks of size restCount.
         unsigned restCount;          ///< Coeffs per point (0, 9, 24, or 45 typical).
+        bool restCoeffsInterleaved;  ///< KHR sidecar: coefficient-major RGB; legacy PLY: channel-major.
         int shDegree;                ///< Max SH degree to evaluate (0..3).
         DBL opacityCutoff;           ///< Skip weights below this.
         DBL alphaStop;               ///< Stop compositing when accumulated alpha exceeds this.
-        /// Sample-Viewer huge-quad cull: skip if max(3*sqrt(cov_ii)) > frac * min(W,H).
+        DBL alphaClamp;              ///< Maximum per-splat alpha (Sample Viewer default 0.99).
+        DBL sigmaExtent;             ///< Gaussian support radius in standard deviations (default 3).
+        DBL ewaFilter;               ///< Screen-space covariance diagonal regularizer (default 0.3).
+        /// Sample-Viewer huge-quad cull: skip if max(sigmaExtent*sqrt(cov_ii)) > frac * min(W,H).
         /// 0 = disabled (legacy); 0.5 = Khronos / glTF Sample Viewer default.
         DBL maxQuadFrac;
         int samples;                 ///< 1 = 3D peak; 2 = project/sort/blend (Kerbl); >=3 = Vol3DGS volume α.
@@ -97,9 +103,9 @@ class GaussianSplatCloud final : public NonsolidObject
         /// (typical soft edge / floater fringe). Off = legacy compositing.
         bool cullSingletonHits;
         /// KHR_gaussian_splatting ellipse kernel fidelity:
-        /// samples=2 projected path, cameraDistance sort, 3-sigma cutoff,
-        /// float blend before tonemap, Sigma = M C C^T M^T, no Kerbl 0.3px
-        /// low-pass, no volume refill on primary miss; secondary = orthographic
+        /// samples=2 projected path, cameraDistance sort, configurable sigma cutoff/EWA,
+        /// float blend before tonemap, Sigma = M C C^T M^T,
+        /// no volume refill on primary miss; secondary = orthographic
         /// ray-plane projection of Sigma (no perspective J; spec is camera-primary).
         bool khrEllipse;
         /// Authored KHR meta from Assimp (empty if source had none, e.g. PLY).
@@ -185,7 +191,7 @@ class GaussianSplatCloud final : public NonsolidObject
         void EvalColour(const GaussianSplatPoint& sp, const Vector3d& viewDir, Vector3d& rgb) const;
 
         /// Map world-space camera→splat direction into the SH authoring frame (applies R^{-1}).
-        void ViewDirForSH(const Vector3d& camToSplatWorld, Vector3d& outLocal) const;
+        void ViewDirForSH(const GaussianSplatPoint& sp, const Vector3d& camToSplatWorld, Vector3d& outLocal) const;
 
         /// Integrate SH emission + alpha along ray segment [t0,t1] in object/local space.
         /// @param viewDir  Direction toward viewer (typically -dir) — flipped to camera→splat for SH.

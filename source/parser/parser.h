@@ -787,7 +787,8 @@ class Parser final
         ObjectPtr Parse_Gaussian_Splat();
         void Parse_Assimp_Mesh(Mesh*);
         void Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool &approximate, int &shDegree,
-                                        DBL &opacityCutoff, DBL &alphaStop, DBL &maxQuadFrac,
+                                        DBL &opacityCutoff, DBL &alphaStop, DBL &alphaClamp,
+                                        DBL &sigmaExtent, DBL &ewaFilter, DBL &maxQuadFrac,
                                         int &samples, int &maxHits, DBL &giWeight,
                                         bool &asSurface, bool &surfaceSmooth, bool &filterFloaters,
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
