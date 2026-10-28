@@ -449,6 +449,7 @@
     <ClCompile Include="..\..\source\core\shape\fractal.cpp" />
     <ClCompile Include="..\..\source\core\shape\gaussiansplat.cpp" />
     <ClCompile Include="..\..\source\core\shape\gaussiansplat_surface.cpp" />
+    <ClCompile Include="..\..\source\core\shape\gaussiansplat_vk.cpp" />
     <ClCompile Include="..\..\source\core\shape\heightfield.cpp" />
     <ClCompile Include="..\..\source\core\shape\isosurface.cpp" />
     <ClCompile Include="..\..\source\core\shape\lathe.cpp" />
@@ -543,6 +544,7 @@
     <ClInclude Include="..\..\source\core\shape\parametric.h" />
     <ClInclude Include="..\..\source\core\shape\fractal.h" />
     <ClInclude Include="..\..\source\core\shape\gaussiansplat.h" />
+    <ClInclude Include="..\..\source\core\shape\gaussiansplat_vk.h" />
     <ClInclude Include="..\..\source\core\shape\heightfield.h" />
     <ClInclude Include="..\..\source\core\shape\isosurface.h" />
     <ClInclude Include="..\..\source\core\shape\lathe.h" />
