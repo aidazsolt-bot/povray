@@ -95,6 +95,12 @@
     <ClCompile Include="..\..\source\core\shape\fractal.cpp">
       <Filter>Core Source\Shape</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\core\shape\gaussiansplat.cpp">
+      <Filter>Core Source\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\source\core\shape\gaussiansplat_surface.cpp">
+      <Filter>Core Source\Shape</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\core\shape\lathe.cpp">
       <Filter>Core Source\Shape</Filter>
     </ClCompile>
@@ -317,6 +323,9 @@
       <Filter>Core Headers\Shape</Filter>
     </ClInclude>
     <ClInclude Include="..\..\source\core\shape\fractal.h">
+      <Filter>Core Headers\Shape</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\source\core\shape\gaussiansplat.h">
       <Filter>Core Headers\Shape</Filter>
     </ClInclude>
     <ClInclude Include="..\..\source\core\shape\lathe.h">
