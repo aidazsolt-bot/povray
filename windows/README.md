@@ -46,18 +46,18 @@ These groups provide the best means for support with relation to this subject.
 Compilers
 =========
 
-Visual Studio 2015
+Visual Studio 2022
 ------------------
 
 Currently the only officially supported means of building the Windows
-version of POV-Ray is via the provided Visual Studio 2015 solution.
+version of POV-Ray is via the provided Visual Studio 2022 solution.
 
-You will need Visual Studio 2015 (Community Edition will suffice) or later.
+You will need Visual Studio 2022 (Community Edition will suffice) or later.
 
 Earlier Versions of Visual Studio
 ---------------------------------
 
-Due to the free availability of Visual Studio 2015 Community Edition
+Due to the free availability of Visual Studio 2022 Community Edition
 and better performance of the generated binaries, we have ceased support
 for earlier versions of Visual Studio.
 
@@ -95,7 +95,7 @@ Build Steps
     support files are present. If you don't do this, your compiled code
     will probably not work on your machine.
 
-2.  Open `windows\vs2015\povray.sln` in Visual Studio. Set
+2.  Open `windows\vs2022\povray.sln` in Visual Studio. Set
     'Windows Targets > GUI' as the start-up project if it is not already
     selected. Then, select the 'Generic POV-Ray > povbase' project
     and expand 'Backend Headers', then open the file `build.h` listed
@@ -131,8 +131,8 @@ Build Steps
 
     If all goes well, you should end up with the POV-Ray for Windows
     executable. All 32-bit binaries should end up in
-    `windows\vs2015\bin32`, and the 64-bit ones should be in
-    `windows\vs2015\bin64`.
+    `windows\vs2022\bin32`, and the 64-bit ones should be in
+    `windows\vs2022\bin64`.
 
     Note: if you are building a DEBUG version of POV-Ray, be aware that
     the executable will attempt to load the debug version of POV-Ray's
@@ -169,13 +169,13 @@ in mind' at the end.
 Building for Legacy Windows Versions
 ------------------------------------
 
-By default, binaries generated with Visual Studio 2015 will only run on
-Windows Vista or later. Visual Studio 2015 can be used to generate binaries
+By default, binaries generated with Visual Studio 2022 will only run on
+Windows Vista or later. Visual Studio 2022 can be used to generate binaries
 compatible with Windows versions as early as Windows XP (SP3 required),
 but the procedure is a bit tricky, and the following description is therefore
 aimed at people with in-depth knowledge of Visual Studio and its toolchain.
 
-You will need Visual Studio 2015 (again Community Edition will suffice)
+You will need Visual Studio 2022 (again Community Edition will suffice)
 _Update 1_ or later, with the following optional features installed:
 
 -   Programming Languages / Visual C++ / Windows XP Support for C++
@@ -188,7 +188,7 @@ settings shown below accordingly.)
 To enable XP compatibility, you will have to either edit or override the
 following properties in _all_ Visual Studio project files:
 
--   `PlatformToolset` must be set to `v140_xp`.
+-   `PlatformToolset` must be set to `v143` (Visual Studio 2022).
 -   `TargetUniversalCRTVersion` must be set to `10.0.10568.0`.
 
 The latter is the tricky part, as the property cannot be accessed via

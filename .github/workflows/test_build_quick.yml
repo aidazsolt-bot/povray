@@ -80,10 +80,10 @@ jobs:
       uses: ./.github/actions/windows_build
       with:
         pov-ray-build-id: gh${{github.run_number}}
-        solution: vs2015
+        solution: vs2022
         configuration: Release
         platform: x64
-        toolset: v142
+        toolset: v143
         msbuild-options: ''
     - name: 'Sanity-Check Working Tree'
       uses: ./.github/actions/git_check_repo

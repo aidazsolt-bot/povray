@@ -165,9 +165,9 @@ jobs:
           bin-name: pvengine64.exe
           install-name: pvengine64.exe
           compatibility: ''
-          os: windows-2016
-          solution-dir: vs2015
-          toolset: v140 # VS 2015
+          os: windows-latest
+          solution-dir: vs2022
+          toolset: v143 # VS 2022
           msbuild-options: ''
 
         - artifact-suffix: Win32-sse2
@@ -177,9 +177,9 @@ jobs:
           bin-name: pvengine32-sse2.exe
           install-name: pvengine-sse2.exe
           compatibility: ''
-          os: windows-2016
-          solution-dir: vs2015
-          toolset: v140 # VS 2015
+          os: windows-latest
+          solution-dir: vs2022
+          toolset: v143 # VS 2022
           msbuild-options: ''
 
         - artifact-suffix: Win32
@@ -189,9 +189,9 @@ jobs:
           bin-name: pvengine32.exe
           install-name: pvengine.exe
           compatibility: ''
-          os: windows-2016
-          solution-dir: vs2015
-          toolset: v140 # VS 2015
+          os: windows-latest
+          solution-dir: vs2022
+          toolset: v143 # VS 2022
           msbuild-options: ''
 
 #        - artifact-suffix: Win32-xp
@@ -202,8 +202,8 @@ jobs:
 #          install-name: pvengine.exe
 #          compatibility: 'xp'
 #          os: windows-2016
-#          solution-dir: vs2015
-#          toolset: v140_xp # VS 2015 with XP support
+#          solution-dir: vs2022
+#          toolset: v143 # VS 2022
 #          msbuild-options: '/p:TargetUniversalCRTVersion=10.0.10586.0'
 
     steps:

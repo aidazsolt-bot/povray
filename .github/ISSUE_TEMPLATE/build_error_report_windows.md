@@ -27,7 +27,7 @@ Also, PLEASE DELETE any sections that you would leave empty.
 **Build Environment**
 
   - Operating system: [e.g. Windows 10 Pro 20H2 64 bit]
-  - Compiler: [e.g. Visual Studio 2015 SP2]
+  - Compiler: [e.g. Visual Studio 2022]
 
 **Build Settings**
 
