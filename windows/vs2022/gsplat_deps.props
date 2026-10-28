@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Gaussian splat / Assimp / Vulkan deps for the vs2022 solution.
+
+  HOW TO ENABLE (edit this file only):
+    1. Set PovEnableGsplatDeps to true
+    2. Set PovAssimpRoot to your Assimp tree (Arris fork with KHR gaussian API)
+    3. Set PovAssimpLibDir + PovAssimpLibName to the .lib you built
+    4. Set PovVulkanInclude to the folder that CONTAINS the "vulkan" subdir
+       (Vulkan SDK:  C:\VulkanSDK\<ver>\Include
+        vulkan-headers repo: <repo>\include)
+    5. Rebuild the solution (Release|x64).
+    6. Copy the Assimp DLL next to bin64\pvengine64.exe (or console exe).
+       Vulkan loader (vulkan-1.dll) comes from the GPU driver / Vulkan SDK runtime.
+
+  Leave PovEnableGsplatDeps=false for a stock build (CI default).
+  volk loads vulkan-1.dll at runtime - no vulkan-1.lib link required.
+-->
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ========== EDIT THESE ========== -->
+  <PropertyGroup Label="GsplatDeps">
+    <PovEnableGsplatDeps>false</PovEnableGsplatDeps>
+
+    <!-- Assimp source/install root (needs include\assimp\... and preferably generated config). -->
+    <PovAssimpRoot>C:\path\to\Assimp-Arris.Git.2026</PovAssimpRoot>
+    <!-- Folder with the .lib (Release MSVC build). -->
+    <PovAssimpLibDir>$(PovAssimpRoot)\build\lib\Release</PovAssimpLibDir>
+    <!-- Typical names: assimp-vc143-mt.lib, assimp-vc142-mt.lib, assimp.lib -->
+    <PovAssimpLibName>assimp-vc143-mt.lib</PovAssimpLibName>
+    <!-- Extra Assimp include if generated headers live outside include\ (optional). -->
+    <PovAssimpGeneratedInclude>$(PovAssimpRoot)\build\include</PovAssimpGeneratedInclude>
+
+    <!-- Directory that contains vulkan\vulkan.h (or vulkan\vulkan.hpp). -->
+    <PovVulkanInclude>C:\VulkanSDK\1.3.296.0\Include</PovVulkanInclude>
+  </PropertyGroup>
+  <!-- ========== END EDIT ========== -->
+
+  <PropertyGroup Condition="'$(PovEnableGsplatDeps)'=='true'">
+    <_PropertySheetDisplayName>POV-Ray Gsplat Assimp+Vulkan deps (enabled)</_PropertySheetDisplayName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(PovEnableGsplatDeps)'!='true'">
+    <_PropertySheetDisplayName>POV-Ray Gsplat Assimp+Vulkan deps (disabled)</_PropertySheetDisplayName>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(PovEnableGsplatDeps)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>
+        POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1;
+        POV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1;
+        POV_HAVE_VULKAN;
+        VK_NO_PROTOTYPES;
+        %(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>
+        $(PovAssimpRoot)\include;
+        $(PovAssimpGeneratedInclude);
+        $(PovVulkanInclude);
+        $(MSBuildThisFileDirectory)..\..\libraries\volk;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(PovAssimpLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(PovAssimpLibName);%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+</Project>

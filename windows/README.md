@@ -104,6 +104,11 @@ Build Steps
     `#error` directive afterwards to proceed with the build. Note that
     if you do not do this you will get compile errors.
 
+    Optional Assimp + Vulkan Gaussian splat path: edit
+    `windows\vs2022\gsplat_deps.props` (set `PovEnableGsplatDeps` to `true`
+    and the Assimp/Vulkan paths). See `windows\vs2022\GSPLAT_DEPS.md`.
+    Leave it disabled for a stock build.
+
     Note: If you are building in a Git local workspace, we recommend you run
     `git update-index --skip-workspace source/base/build.h`. This will keep
     your changes to the file from being included in a commit, or overwritten

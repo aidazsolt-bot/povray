@@ -81,6 +81,9 @@
     <ClCompile Include="..\..\source\parser\parser_obj.cpp">
       <Filter>Parser Source</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\parser\parser_assimp.cpp">
+      <Filter>Parser Source</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\parser\scanner.cpp">
       <Filter>Parser Source</Filter>
     </ClCompile>
