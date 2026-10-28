@@ -63,7 +63,9 @@ Attribute::~Attribute () {}
 
 namespace {
 
-struct NameCompare: std::binary_function <const char *, const char *, bool>
+// std::binary_function was removed from the C++ standard library; a plain
+// comparator is enough for std::map and works on current MSVC (14.4x+).
+struct NameCompare
 {
     bool
     operator () (const char *x, const char *y) const

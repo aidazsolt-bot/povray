@@ -131,13 +131,24 @@
     // (no need to set `POV_*_SUPPORTED for VS 2019 and later, we can probe `__cplusplus`)
     // TODO - This compiler version has been tested, but no effort has been made yet
     // to iron out any inconveniences such as unwarranted warnings or the like.
+  #elif _MSC_VER >= 1930 && _MSC_VER < 1940
+    // MS Visual C++ 2022 (aka 14.3x) - VS 2022 17.0-17.9 / PlatformToolset v143
+    #define POV_COMPILER_VER                  "msvc143"
+    #define METADATA_COMPILER_STRING          "msvc 14.3x"
+    #define POV_CPP11_SUPPORTED               1
+  #elif _MSC_VER >= 1940 && _MSC_VER < 1950
+    // MS Visual C++ 14.4x - VS 2022 17.10+ and current windows-latest (VS 18) with v143
+    #define POV_COMPILER_VER                  "msvc144"
+    #define METADATA_COMPILER_STRING          "msvc 14.4x"
+    #define POV_CPP11_SUPPORTED               1
   #else
-    // Unrecognized version of MS Visual C++
-    #error("Your version of MS Visual C++ is still unknown to us. Proceed at your own risk.")
+    // Newer MS Visual C++ than listed above - allow builds (CI / future toolsets).
+    #pragma message("syspovconfig_msvc.h: unrecognized MSVC _MSC_VER; treating as generic msvc")
     #define POV_COMPILER_VER                  "msvc"
     #define METADATA_COMPILER_STRING          "msvc"
     #define POV_CPP11_SUPPORTED               1
   #endif
+
   #define COMPILER_NAME                       "Microsoft Visual C++"
   #define COMPILER_VERSION                    _MSC_VER
 
