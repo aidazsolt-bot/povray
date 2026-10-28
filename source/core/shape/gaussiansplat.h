@@ -26,6 +26,13 @@ namespace pov
 {
 
 class Mesh;
+struct GaussianSplatVkFramebuffer;
+
+enum class GaussianSplatRenderBackend
+{
+    Cpu = 0,
+    Vulkan = 1
+};
 
 #define GAUSSIAN_SPLAT_OBJECT (PATCH_OBJECT)
 
@@ -124,6 +131,8 @@ class GaussianSplatCloud final : public NonsolidObject
         std::string khrSortingMethod; ///< e.g. "cameraDistance" (default)
         /// When true (KHR default / authored): sort by ||mu-cam||; else view-forward depth.
         bool khrSortCameraDistance;
+        /// Primary projected path: Cpu (default) or Vulkan compute (falls back to Cpu).
+        GaussianSplatRenderBackend renderBackend;
         /// SuperSplat-style opacity voxel surface (as_surface): replace cloud with Mesh.
         bool asSurface;
         /// Inverse-surface extract: opaque MC mesh from occupancy (no volume, no IOR).
@@ -173,6 +182,9 @@ class GaussianSplatCloud final : public NonsolidObject
         };
         mutable ProjCache projCache;
         mutable std::mutex projCacheMutex;
+        /// Vulkan primary framebuffer (valid when renderBackend==Vulkan and build succeeded).
+        mutable GaussianSplatVkFramebuffer *vkFrame;
+        mutable std::mutex vkFrameMutex;
 
         GaussianSplatCloud();
         virtual ~GaussianSplatCloud() override;
@@ -222,6 +234,10 @@ class GaussianSplatCloud final : public NonsolidObject
         /// SuperSplat-style pixel: tile lookup → depth sort → 2D EWA front-to-back blend.
         bool CompositeProjectedPixel(DBL screenU, DBL screenV,
                                      GaussianSplatSegmentResult& out, TraceThreadData *Thread) const;
+
+        /// Build/reuse Vulkan compute framebuffer for this camera (thread-safe).
+        /// Returns false if Vulkan unavailable or dispatch failed (caller uses CPU).
+        bool EnsureVulkanFramebuffer(const GaussianSplatCamBasis& cam) const;
 
         /// Binary opacity-voxel occupancy (SuperSplat collision defaults) + marching
         /// cubes. Triangle pigments/normals are computed here via EvalColour (not Assimp).

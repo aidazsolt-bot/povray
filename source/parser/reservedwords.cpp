@@ -119,6 +119,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { AUTOSTOP_TOKEN,               "autostop" },
     { AVERAGE_TOKEN,                "average" },
 
+    { BACKEND_TOKEN,                "backend" },
     { BACKGROUND_TOKEN,             "background" },
     { BEZIER_SPLINE_TOKEN,          "bezier_spline" },
     { BICUBIC_PATCH_TOKEN,          "bicubic_patch" },
@@ -182,6 +183,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { COS_TOKEN,                    "cos" },
     { COSH_TOKEN,                   "cosh" },
     { COUNT_TOKEN,                  "count" },
+    { CPU_TOKEN,                    "cpu" },
     { CRACKLE_TOKEN,                "crackle" },
     { CRAND_TOKEN,                  "crand" },
     { CUBE_TOKEN,                   "cube" },
@@ -638,6 +640,7 @@ const RESERVED_WORD Reserved_Words[] = {
     { VROTATE_TOKEN,                "vrotate" },
     { VSTR_TOKEN,                   "vstr" },
     { VTURBULENCE_TOKEN,            "vturbulence" },
+    { VULKAN_TOKEN,                 "vulkan" },
 
     { WARNING_TOKEN,                "warning" },
     { WARP_TOKEN,                   "warp" },

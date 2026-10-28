@@ -501,6 +501,25 @@ void BuildInitInfo(POVMSObjectPtr msg)
     }
 #endif
 
+#if defined(POV_HAVE_VULKAN)
+    // Vulkan loader (Gaussian splat compute backend)
+    if(err == kNoErr)
+    {
+        err = POVMSAttr_New(&attr);
+        if(err == kNoErr)
+        {
+            const char *tempstr =
+                "Vulkan libvulkan, Khronos Group, https://www.khronos.org/vulkan/";
+
+            err = POVMSAttr_Set(&attr, kPOVMSType_CString, reinterpret_cast<const void *>(tempstr), (int) strlen(tempstr) + 1);
+            if(err == kNoErr)
+                err = POVMSAttrList_Append(&attrlist, &attr);
+            else
+                err = POVMSAttr_Delete(&attr);
+        }
+    }
+#endif
+
 #ifndef OPENEXR_MISSING
     // OpenEXR and related libraries version and copyright notice
     if(err == kNoErr)

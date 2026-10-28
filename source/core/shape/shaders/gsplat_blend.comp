@@ -1,0 +1,157 @@
+#version 450
+// Per-pixel tile lookup, depth/camDist sort, front-to-back 2D EWA blend.
+// Writes RGBA + depth + normal into framebuffer buffers.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct ProjEntry {
+    float meanU, meanV;
+    float cov00, cov01, cov11;
+    float depth;
+    float camDist;
+    float alpha;
+    float r, g, b;
+    float nx, ny, nz;
+    int valid;
+    int _pad0;
+    int _pad1;
+    int _pad2;
+};
+
+layout(std430, binding = 0) readonly buffer Projs { ProjEntry projs[]; };
+layout(std430, binding = 1) readonly buffer TileOffsets { int offsets[]; };
+layout(std430, binding = 2) readonly buffer TileIndices { int indices[]; };
+layout(std430, binding = 3) writeonly buffer OutRGBA { vec4 rgba[]; };   // premul rgb + alpha
+layout(std430, binding = 4) writeonly buffer OutDepth { float depth[]; };
+layout(std430, binding = 5) writeonly buffer OutNormal { vec4 normal[]; }; // xyz, w unused
+
+layout(std140, binding = 6) uniform BlendFrame {
+    vec4 grid;    // x=tileOriginU y=tileOriginV z=tileSize w=tilesX
+    vec4 dims;    // x=imgW y=imgH z=tilesY w=sigmaExtent
+    vec4 params;  // x=opacityCutoff y=alphaClamp z=alphaStop w=powerCull
+    vec4 flags;   // x=khrEllipse y=sortCamDist z=cullSingleton w=relight
+};
+
+const int kMaxHits = 128;
+
+void main() {
+    uint px = gl_GlobalInvocationID.x;
+    uint py = gl_GlobalInvocationID.y;
+    int imgW = int(dims.x);
+    int imgH = int(dims.y);
+    if (int(px) >= imgW || int(py) >= imgH) return;
+
+    uint pix = py * uint(imgW) + px;
+    // Screen coords: pixels from image centre (POV TracePixel convention).
+    // POV: screenV = (0.5 - y/H)*H = H/2 - y  (y=0 at top -> +V).
+    float screenU = (float(px) + 0.5) - 0.5 * float(imgW);
+    float screenV = 0.5 * float(imgH) - (float(py) + 0.5);
+
+    int tilesX = int(grid.w);
+    int tilesY = int(dims.z);
+    float ts = grid.z;
+    int tx = int(floor((screenU - grid.x) / ts));
+    int ty = int(floor((screenV - grid.y) / ts));
+    if (tx < 0 || ty < 0 || tx >= tilesX || ty >= tilesY) {
+        rgba[pix] = vec4(0.0);
+        depth[pix] = 0.0;
+        normal[pix] = vec4(0.0);
+        return;
+    }
+
+    int tile = ty * tilesX + tx;
+    int begin = offsets[tile];
+    int end = offsets[tile + 1];
+    if (begin >= end) {
+        rgba[pix] = vec4(0.0);
+        depth[pix] = 0.0;
+        normal[pix] = vec4(0.0);
+        return;
+    }
+
+    bool khr = flags.x > 0.5;
+    float powerCull = params.w;
+    if (khr)
+        powerCull = dims.w * dims.w;
+
+    float sortKey[kMaxHits];
+    int hitIdx[kMaxHits];
+    float hitAlpha[kMaxHits];
+    int nHits = 0;
+
+    for (int ii = begin; ii < end && nHits < kMaxHits; ++ii) {
+        int ei = indices[ii];
+        ProjEntry e = projs[ei];
+        if (e.valid == 0) continue;
+        float du = screenU - e.meanU;
+        float dv = screenV - e.meanV;
+        float det = e.cov00 * e.cov11 - e.cov01 * e.cov01;
+        if (det <= 1e-12) continue;
+        float power = (e.cov11 * du * du - 2.0 * e.cov01 * du * dv + e.cov00 * dv * dv) / det;
+        if (power > powerCull) continue;
+        float g = exp(-0.5 * power);
+        float alpha = min(params.y, clamp(e.alpha * g, 0.0, 1.0));
+        if (alpha <= 0.0 || alpha < params.x) continue;
+        sortKey[nHits] = (khr && flags.y > 0.5) ? e.camDist : e.depth;
+        hitIdx[nHits] = ei;
+        hitAlpha[nHits] = alpha;
+        nHits++;
+    }
+
+    if (nHits == 0 || (flags.z > 0.5 && nHits < 2)) {
+        rgba[pix] = vec4(0.0);
+        depth[pix] = 0.0;
+        normal[pix] = vec4(0.0);
+        return;
+    }
+
+    // Insertion sort (near first).
+    for (int i = 1; i < nHits; ++i) {
+        float sk = sortKey[i];
+        int hi = hitIdx[i];
+        float ha = hitAlpha[i];
+        int j = i - 1;
+        while (j >= 0 && sortKey[j] > sk) {
+            sortKey[j + 1] = sortKey[j];
+            hitIdx[j + 1] = hitIdx[j];
+            hitAlpha[j + 1] = hitAlpha[j];
+            --j;
+        }
+        sortKey[j + 1] = sk;
+        hitIdx[j + 1] = hi;
+        hitAlpha[j + 1] = ha;
+    }
+
+    vec3 acc = vec3(0.0);
+    vec3 nsum = vec3(0.0);
+    float T = 1.0;
+    float depthSum = 0.0;
+    float depthW = 0.0;
+    bool relight = flags.w > 0.5;
+    float alphaStop = params.z;
+
+    for (int i = 0; i < nHits && (khr || T > (1.0 - alphaStop)); ++i) {
+        ProjEntry e = projs[hitIdx[i]];
+        float alpha = hitAlpha[i];
+        float contrib = alpha * T;
+        acc += vec3(e.r, e.g, e.b) * contrib;
+        if (relight)
+            nsum += vec3(e.nx, e.ny, e.nz) * contrib;
+        depthSum += e.depth * contrib;
+        depthW += contrib;
+        T *= (1.0 - alpha);
+    }
+
+    float alphaOut = clamp(1.0 - T, 0.0, 1.0);
+    if (alphaOut <= 0.0 || (!khr && alphaOut < params.x)) {
+        rgba[pix] = vec4(0.0);
+        depth[pix] = 0.0;
+        normal[pix] = vec4(0.0);
+        return;
+    }
+
+    rgba[pix] = vec4(acc, alphaOut);
+    depth[pix] = (depthW > 1e-12) ? (depthSum / depthW) : projs[hitIdx[0]].depth;
+    float nlen = length(nsum);
+    normal[pix] = (nlen > 1e-12) ? vec4(nsum / nlen, 0.0) : vec4(0.0);
+}

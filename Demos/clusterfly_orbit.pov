@@ -16,8 +16,9 @@ global_settings {
 #declare OrbitHeight = LookAt.y + 0.12;
 #declare AngleDeg    = 45.0;
 #declare Ang         = clock * 2.0 * pi;
+// Frames 1..79: lighting_mode relight. From frame 80 (clock >= 79/159): KHR + colorspace.
 #ifndef (RelightSplats)
-  #declare RelightSplats = 1;
+  #declare RelightSplats = (clock < 79/159);
 #end
 
 camera {
@@ -50,6 +51,7 @@ gaussian_splat {
   "models/ClusterFlySplat/ClusterFly_M.ply"
   khr_ellipse
   sort_depth
+  backend vulkan
   #if (RelightSplats)
     lighting_mode relight
   #else

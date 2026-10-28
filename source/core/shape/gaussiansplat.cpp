@@ -17,6 +17,7 @@
 //******************************************************************************
 
 #include "core/shape/gaussiansplat.h"
+#include "core/shape/gaussiansplat_vk.h"
 
 #include <algorithm>
 #include <cmath>
@@ -269,6 +270,7 @@ GaussianSplatCloud::GaussianSplatCloud() :
     cullSingletonHits(true),
     khrEllipse(false),
     khrSortCameraDistance(true),
+    renderBackend(GaussianSplatRenderBackend::Cpu),
     asSurface(false),
     inverseSurface(false),
     surfaceSmooth(false),
@@ -278,7 +280,8 @@ GaussianSplatCloud::GaussianSplatCloud() :
     surfaceMinOpacity(1.0 / 255.0),
     floaterVoxelSize(0.05),
     floaterVoxelOpacity(0.1),
-    floaterMinOpacity(0.004)
+    floaterMinOpacity(0.004),
+    vkFrame(nullptr)
 {
     Type |= PATCH_OBJECT | TEXTURED_OBJECT;
     Set_Flag(this, HOLLOW_FLAG);
@@ -289,6 +292,8 @@ GaussianSplatCloud::GaussianSplatCloud() :
 
 GaussianSplatCloud::~GaussianSplatCloud()
 {
+    delete vkFrame;
+    vkFrame = nullptr;
 }
 
 ObjectPtr GaussianSplatCloud::Copy()
@@ -321,6 +326,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->khrProjection = khrProjection;
     New->khrSortingMethod = khrSortingMethod;
     New->khrSortCameraDistance = khrSortCameraDistance;
+    New->renderBackend = renderBackend;
     New->asSurface = asSurface;
     New->inverseSurface = inverseSurface;
     New->exportMeshPath = exportMeshPath;
@@ -1022,6 +1028,114 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     return true;
 }
 
+bool GaussianSplatCloud::EnsureVulkanFramebuffer(const GaussianSplatCamBasis& cam) const
+{
+    if (!cam.camValid || renderBackend != GaussianSplatRenderBackend::Vulkan)
+        return false;
+    if (cam.screenW <= EPSILON || cam.screenH <= EPSILON)
+        return false;
+    if (!GaussianSplatVkAvailable())
+        return false;
+
+    std::lock_guard<std::mutex> lock(vkFrameMutex);
+    auto sameVec = [](const Vector3d& a, const Vector3d& b) {
+        return std::fabs(a[X] - b[X]) < 1.0e-9 &&
+               std::fabs(a[Y] - b[Y]) < 1.0e-9 &&
+               std::fabs(a[Z] - b[Z]) < 1.0e-9;
+    };
+    if (vkFrame != nullptr && vkFrame->valid &&
+        vkFrame->width == static_cast<int>(std::lround(cam.screenW)) &&
+        vkFrame->height == static_cast<int>(std::lround(cam.screenH)) &&
+        sameVec(vkFrame->origin, cam.origin) &&
+        sameVec(vkFrame->right, cam.right) &&
+        sameVec(vkFrame->up, cam.up) &&
+        sameVec(vkFrame->forward, cam.forward) &&
+        std::fabs(vkFrame->fx - cam.fx) < 1.0e-6 &&
+        std::fabs(vkFrame->fy - cam.fy) < 1.0e-6)
+    {
+        return true;
+    }
+
+    std::vector<GaussianSplatGpuSplat> gpuSplats;
+    gpuSplats.reserve(points.size());
+    for (size_t pi = 0; pi < points.size(); ++pi)
+    {
+        const GaussianSplatPoint& sp = points[pi];
+        const DBL opac = Clamp01(sp.opacity * opacityScale);
+        if (opac <= 0.0 || opac <= opacityCutoff)
+            continue;
+
+        Vector3d pos = sp.position;
+        const TRANSFORM *sourceTransform =
+            (sp.transformIndex < sourceTransforms.size()) ? &sourceTransforms[sp.transformIndex] : nullptr;
+        if (sourceTransform != nullptr)
+            MTransPoint(pos, pos, sourceTransform);
+        if (Trans != nullptr)
+            MTransPoint(pos, pos, Trans);
+
+        DBL SigmaW[3][3];
+        BuildSigmaObject(sp, SigmaW, khrEllipse);
+        TransformCovariance(SigmaW, sourceTransform);
+        TransformCovariance(SigmaW, Trans);
+
+        Vector3d rgb;
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+            EvalDiffuseColour(sp, rgb);
+        else
+        {
+            Vector3d camToSplat = pos - cam.origin;
+            if (camToSplat.lengthSqr() > EPSILON)
+                camToSplat.normalize();
+            Vector3d shDir;
+            ViewDirForSH(sp, camToSplat, shDir);
+            EvalColour(sp, shDir, rgb);
+        }
+        if (!khrEllipse)
+            rgb = TonemapSplatRgb(rgb);
+
+        Vector3d normal(0.0, 0.0, 0.0);
+        if (lightingMode == GaussianSplatLightingMode::Relight)
+        {
+            normal = SplatNormalObject(sp, sourceTransform);
+            if (Trans != nullptr)
+                MTransNormal(normal, normal, Trans);
+            if (normal.lengthSqr() > EPSILON)
+                normal.normalize();
+            const Vector3d rel = pos - cam.origin;
+            if (dot(normal, rel) > 0.0)
+                normal = -normal;
+        }
+
+        GaussianSplatGpuSplat g = {};
+        g.posAlpha[0] = static_cast<float>(pos[X]);
+        g.posAlpha[1] = static_cast<float>(pos[Y]);
+        g.posAlpha[2] = static_cast<float>(pos[Z]);
+        g.posAlpha[3] = static_cast<float>(opac);
+        g.sig0[0] = static_cast<float>(SigmaW[0][0]);
+        g.sig0[1] = static_cast<float>(SigmaW[0][1]);
+        g.sig0[2] = static_cast<float>(SigmaW[0][2]);
+        g.sig0[3] = static_cast<float>(SigmaW[1][1]);
+        g.sig1[0] = static_cast<float>(SigmaW[1][2]);
+        g.sig1[1] = static_cast<float>(SigmaW[2][2]);
+        g.rgbNx[0] = static_cast<float>(rgb[X]);
+        g.rgbNx[1] = static_cast<float>(rgb[Y]);
+        g.rgbNx[2] = static_cast<float>(rgb[Z]);
+        g.rgbNx[3] = static_cast<float>(normal[X]);
+        g.nyNz[0] = static_cast<float>(normal[Y]);
+        g.nyNz[1] = static_cast<float>(normal[Z]);
+        gpuSplats.push_back(g);
+    }
+
+    if (vkFrame == nullptr)
+        vkFrame = new GaussianSplatVkFramebuffer();
+    if (!GaussianSplatVkRenderFrame(*this, cam, gpuSplats, *vkFrame))
+    {
+        vkFrame->valid = false;
+        return false;
+    }
+    return vkFrame->valid;
+}
+
 bool GaussianSplatCloud::EnsureProjectedCache(const GaussianSplatCamBasis& cam) const
 {
     if (!cam.camValid)
@@ -1413,8 +1527,19 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         cam.screenH = Thread->GaussianSplatCam.screenH;
         cam.camValid = true;
         cam.pixelValid = true;
-        if (EnsureProjectedCache(cam) &&
+
+        bool gotSeg = false;
+        if (renderBackend == GaussianSplatRenderBackend::Vulkan &&
+            EnsureVulkanFramebuffer(cam))
+        {
+            std::lock_guard<std::mutex> vkLock(vkFrameMutex);
+            gotSeg = (vkFrame != nullptr) &&
+                     GaussianSplatVkSamplePixel(*vkFrame, cam.screenU, cam.screenV, seg);
+        }
+        if (!gotSeg && EnsureProjectedCache(cam) &&
             CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread))
+            gotSeg = true;
+        if (gotSeg)
         {
             // View depth along camera forward → ray distance.
             const Vector3d rayDir = Vector3d(ray.Direction).normalized();

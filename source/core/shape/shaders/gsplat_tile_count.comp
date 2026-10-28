@@ -1,0 +1,56 @@
+#version 450
+// Count tile coverage per projected splat (atomic histogram).
+
+layout(local_size_x = 256) in;
+
+struct ProjEntry {
+    float meanU, meanV;
+    float cov00, cov01, cov11;
+    float depth;
+    float camDist;
+    float alpha;
+    float r, g, b;
+    float nx, ny, nz;
+    int valid;
+    int _pad0;
+    int _pad1;
+    int _pad2;
+};
+
+layout(std430, binding = 0) readonly buffer Projs { ProjEntry projs[]; };
+layout(std430, binding = 1) buffer TileCounts { uint counts[]; }; // tilesX*tilesY
+layout(std430, binding = 2) buffer Meta { uint totalKeys; uint _pad[3]; };
+
+layout(std140, binding = 3) uniform TileFrame {
+    vec4 grid;   // x=tileOriginU, y=tileOriginV, z=tileSize, w=splatCount
+    vec4 dims;   // x=tilesX, y=tilesY, z=sigmaExtent, w=maxKeys
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint n = uint(grid.w);
+    if (i >= n) return;
+
+    ProjEntry e = projs[i];
+    if (e.valid == 0) return;
+
+    float extentU = dims.z * sqrt(max(e.cov00, 0.0));
+    float extentV = dims.z * sqrt(max(e.cov11, 0.0));
+    int tilesX = int(dims.x);
+    int tilesY = int(dims.y);
+    float ts = grid.z;
+    float ou = grid.x;
+    float ov = grid.y;
+
+    int x0 = clamp(int(floor((e.meanU - extentU - ou) / ts)), 0, tilesX - 1);
+    int x1 = clamp(int(floor((e.meanU + extentU - ou) / ts)), 0, tilesX - 1);
+    int y0 = clamp(int(floor((e.meanV - extentV - ov) / ts)), 0, tilesY - 1);
+    int y1 = clamp(int(floor((e.meanV + extentV - ov) / ts)), 0, tilesY - 1);
+
+    uint local = uint((x1 - x0 + 1) * (y1 - y0 + 1));
+    atomicAdd(totalKeys, local);
+
+    for (int ty = y0; ty <= y1; ++ty)
+        for (int tx = x0; tx <= x1; ++tx)
+            atomicAdd(counts[ty * tilesX + tx], 1u);
+}

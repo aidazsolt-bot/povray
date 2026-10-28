@@ -55,6 +55,7 @@
 #include "core/scene/scenedata.h"
 #include "core/shape/csg.h"
 #include "core/shape/gaussiansplat.h"
+#include "core/shape/gaussiansplat_vk.h"
 #include "core/shape/mesh.h"
 #include "core/shape/sphere.h"
 #include "core/support/imageutil.h"
@@ -1048,7 +1049,7 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
                                         DBL &surfaceVoxelSize, DBL &surfaceVoxelOpacity,
                                         DBL &floaterVoxelSize, DBL &floaterVoxelOpacity, DBL &floaterMinOpacity,
                                         bool &khrEllipse, bool &sortDepth, bool &inverseSurface, int &lightingMode,
-                                        int &shColorSpace, std::string &exportMeshPath)
+                                        int &shColorSpace, int &renderBackend, std::string &exportMeshPath)
 {
     EXPECT
         CASE (MAX_COUNT_TOKEN)
@@ -1161,6 +1162,15 @@ void Parser::Parse_Splat_Import_Options(DBL &sphereScale, size_t &maxCount, bool
             maxQuadFrac = Parse_Float();
             if (maxQuadFrac < 0.0) maxQuadFrac = 0.0;
         END_CASE
+        CASE (BACKEND_TOKEN)
+            Get_Token();
+            if (CurrentTrueTokenId() == CPU_TOKEN)
+                renderBackend = 0;
+            else if (CurrentTrueTokenId() == VULKAN_TOKEN)
+                renderBackend = 1;
+            else
+                Expectation_Error("cpu or vulkan");
+        END_CASE
         CASE (SAMPLES_TOKEN)
             samples = static_cast<int>(Parse_Float());
             if (samples < 1) samples = 1;
@@ -1192,7 +1202,7 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
                                DBL surfaceVoxelSize, DBL surfaceVoxelOpacity,
                                DBL floaterVoxelSize, DBL floaterVoxelOpacity, DBL floaterMinOpacity,
                                bool khrEllipse, bool sortDepth, bool inverseSurface, int lightingMode,
-                               int shColorSpace, const std::string &exportMeshPath)
+                               int shColorSpace, int renderBackend, const std::string &exportMeshPath)
 {
     GaussianSplatCloud *cloud = dynamic_cast<GaussianSplatCloud *>(obj);
     if (cloud == nullptr)
@@ -1227,6 +1237,11 @@ void ApplyGaussianSplatQuality(ObjectPtr obj, DBL opacityCutoff, DBL alphaStop, 
         cloud->khrColorSpace = "lin_rec709_display";
     cloud->inverseSurface = inverseSurface;
     cloud->exportMeshPath = exportMeshPath;
+    if (renderBackend == 1)
+        cloud->renderBackend = GaussianSplatRenderBackend::Vulkan;
+    else
+        cloud->renderBackend = GaussianSplatRenderBackend::Cpu;
+    // Note: device/lib details are logged at first GPU frame (stderr).
     if (sortDepth)
     {
         cloud->khrSortCameraDistance = false;
@@ -1393,6 +1408,7 @@ ObjectPtr Parser::Parse_Assimp()
     bool inverseSurface = false;
     int lightingMode = -1;
     int shColorSpace = -1;
+    int renderBackend = 0;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
@@ -1400,7 +1416,8 @@ ObjectPtr Parser::Parse_Assimp()
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace,
+                               renderBackend, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1410,7 +1427,16 @@ ObjectPtr Parser::Parse_Assimp()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace,
+                              renderBackend, exportMeshPath);
+    if (renderBackend == 1)
+    {
+        if (GaussianSplatVkAvailable())
+            Warning("gaussian_splat backend vulkan: libvulkan compute enabled "
+                    "(device/timing logged per frame on stderr).");
+        else
+            Warning("gaussian_splat backend vulkan requested but unavailable - CPU fallback.");
+    }
     // For as_surface / inverse_surface: parse texture/interior onto the cloud first so
     // SH colours can pick up finish; inverse_surface then strips IOR on convert.
     if (asSurface || inverseSurface)
@@ -1463,6 +1489,7 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
     bool inverseSurface = false;
     int lightingMode = -1;
     int shColorSpace = -1;
+    int renderBackend = 0;
     std::string exportMeshPath;
     Parse_Splat_Import_Options(sphereScale, maxCount, approximate, shDegree,
                                opacityCutoff, alphaStop, alphaClamp, sigmaExtent, ewaFilter,
@@ -1470,7 +1497,8 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
                                asSurface, surfaceSmooth, filterFloaters,
                                surfaceVoxelSize, surfaceVoxelOpacity,
                                floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
+                               khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace,
+                               renderBackend, exportMeshPath);
 
     std::string sysPath = ResolveAssimpPath(this, fileName);
     ObjectPtr result = BuildAssimpObject(this, sysPath, sphereScale, maxCount, false, approximate, shDegree);
@@ -1480,7 +1508,16 @@ ObjectPtr Parser::Parse_Gaussian_Splat()
                               asSurface, surfaceSmooth, filterFloaters,
                               surfaceVoxelSize, surfaceVoxelOpacity,
                               floaterVoxelSize, floaterVoxelOpacity, floaterMinOpacity,
-                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace, exportMeshPath);
+                              khrEllipse, sortDepth, inverseSurface, lightingMode, shColorSpace,
+                              renderBackend, exportMeshPath);
+    if (renderBackend == 1)
+    {
+        if (GaussianSplatVkAvailable())
+            Warning("gaussian_splat backend vulkan: libvulkan compute enabled "
+                    "(device/timing logged per frame on stderr).");
+        else
+            Warning("gaussian_splat backend vulkan requested but unavailable - CPU fallback.");
+    }
     // For as_surface / inverse_surface: parse mods onto cloud first, then convert.
     if (asSurface || inverseSurface)
     {

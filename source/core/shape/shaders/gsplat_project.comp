@@ -1,0 +1,151 @@
+#version 450
+// Project world-space Gaussians (packed Sigma) to screen-space ProjEntry.
+// Matches POV BuildProjectedCache Jacobian (Kerbl / KHR ellipse).
+
+layout(local_size_x = 256) in;
+
+struct GpuSplat {
+    vec4 posAlpha; // xyz world, w linear opacity
+    vec4 sig0;     // S00, S01, S02, S11
+    vec4 sig1;     // S12, S22, unused, unused
+    vec4 rgbNx;    // r, g, b, nx
+    vec4 nyNz;     // ny, nz, unused, unused
+};
+
+struct ProjEntry {
+    float meanU, meanV;
+    float cov00, cov01, cov11;
+    float depth;
+    float camDist;
+    float alpha;
+    float r, g, b;
+    float nx, ny, nz;
+    int valid;
+    int _pad0;
+    int _pad1;
+    int _pad2;
+};
+
+layout(std430, binding = 0) readonly buffer Splats { GpuSplat splats[]; };
+layout(std430, binding = 1) writeonly buffer Projs { ProjEntry projs[]; };
+
+layout(std140, binding = 2) uniform Frame {
+    vec4 origin;   // xyz
+    vec4 right;    // xyz, w = fx
+    vec4 up;       // xyz, w = fy
+    vec4 forward;  // xyz, w = splatCount
+    vec4 screen;   // x=W, y=H, z=sigmaExtent, w=ewaFilter
+    vec4 cull;     // x=opacityCutoff, y=maxQuadFrac, z=khrEllipse(0/1), w=unused
+};
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint n = uint(forward.w);
+    if (i >= n) return;
+
+    ProjEntry outE;
+    outE.meanU = outE.meanV = 0.0;
+    outE.cov00 = outE.cov01 = outE.cov11 = 0.0;
+    outE.depth = outE.camDist = outE.alpha = 0.0;
+    outE.r = outE.g = outE.b = 0.0;
+    outE.nx = outE.ny = outE.nz = 0.0;
+    outE.valid = 0;
+    outE._pad0 = outE._pad1 = outE._pad2 = 0;
+
+    GpuSplat sp = splats[i];
+    float opac = clamp(sp.posAlpha.w, 0.0, 1.0);
+    if (opac <= cull.x) {
+        projs[i] = outE;
+        return;
+    }
+
+    vec3 pos = sp.posAlpha.xyz;
+    vec3 rel = pos - origin.xyz;
+    float tx = dot(rel, right.xyz);
+    float ty = dot(rel, up.xyz);
+    float tz = dot(rel, forward.xyz);
+    if (tz <= 1e-6) {
+        projs[i] = outE;
+        return;
+    }
+
+    // Sigma_world (symmetric)
+    float S00 = sp.sig0.x, S01 = sp.sig0.y, S02 = sp.sig0.z, S11 = sp.sig0.w;
+    float S12 = sp.sig1.x, S22 = sp.sig1.y;
+    mat3 SigmaW = mat3(
+        S00, S01, S02,
+        S01, S11, S12,
+        S02, S12, S22
+    );
+
+    // Sigma_cam = W Sigma W^T; rows of W = camera axes (GLSL mat3 column-major).
+    vec3 axR = right.xyz, axU = up.xyz, axF = forward.xyz;
+    mat3 Sc;
+    for (int row = 0; row < 3; ++row) {
+        vec3 ar = (row == 0) ? axR : ((row == 1) ? axU : axF);
+        for (int col = 0; col < 3; ++col) {
+            vec3 ac = (col == 0) ? axR : ((col == 1) ? axU : axF);
+            Sc[col][row] = dot(ar, SigmaW * ac);
+        }
+    }
+
+    float fx = right.w;
+    float fy = up.w;
+    float invZ = 1.0 / tz;
+    float invZ2 = invZ * invZ;
+    // Match gaussiansplat.cpp: jx2 = -fx*tx*invZ2
+    float jx0 = fx * invZ, jx2 = -fx * tx * invZ2;
+    float jy1 = fy * invZ, jy2 = -fy * ty * invZ2;
+
+    // cov = J * Sc * J^T with J 2x3 = [[jx0,0,jx2],[0,jy1,jy2]]
+    float Sj00 = Sc[0][0] * jx0 + Sc[2][0] * jx2;
+    float Sj10 = Sc[0][1] * jx0 + Sc[2][1] * jx2;
+    float Sj20 = Sc[0][2] * jx0 + Sc[2][2] * jx2;
+    float Sj01 = Sc[1][0] * jy1 + Sc[2][0] * jy2;
+    float Sj11 = Sc[1][1] * jy1 + Sc[2][1] * jy2;
+    float Sj21 = Sc[1][2] * jy1 + Sc[2][2] * jy2;
+
+    float cov00 = jx0 * Sj00 + jx2 * Sj20;
+    float cov01 = jx0 * Sj01 + jx2 * Sj21;
+    float cov11 = jy1 * Sj11 + jy2 * Sj21;
+
+    float ewa = screen.w;
+    cov00 += ewa;
+    cov11 += ewa;
+
+    float det = cov00 * cov11 - cov01 * cov01;
+    bool khr = cull.z > 0.5;
+    // NaN check via self-compare (GLSL 450 has no isfinite).
+    if (!(det == det) || det <= (khr ? 0.0 : 1e-12)) {
+        projs[i] = outE;
+        return;
+    }
+
+    float sigma = max(screen.z, 0.0);
+    if (cull.y > 1e-6 && screen.x > 1e-6 && screen.y > 1e-6) {
+        float quadW = sigma * sqrt(max(cov00, 0.0));
+        float quadH = sigma * sqrt(max(cov11, 0.0));
+        float minScreen = min(screen.x, screen.y);
+        if (max(quadW, quadH) > cull.y * minScreen) {
+            projs[i] = outE;
+            return;
+        }
+    }
+
+    outE.meanU = fx * tx * invZ;
+    outE.meanV = fy * ty * invZ;
+    outE.cov00 = cov00;
+    outE.cov01 = cov01;
+    outE.cov11 = cov11;
+    outE.depth = tz;
+    outE.camDist = length(rel);
+    outE.alpha = opac;
+    outE.r = sp.rgbNx.x;
+    outE.g = sp.rgbNx.y;
+    outE.b = sp.rgbNx.z;
+    outE.nx = sp.rgbNx.w;
+    outE.ny = sp.nyNz.x;
+    outE.nz = sp.nyNz.y;
+    outE.valid = 1;
+    projs[i] = outE;
+}
