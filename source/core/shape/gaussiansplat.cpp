@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -292,8 +293,6 @@ GaussianSplatCloud::GaussianSplatCloud() :
 
 GaussianSplatCloud::~GaussianSplatCloud()
 {
-    delete vkFrame;
-    vkFrame = nullptr;
 }
 
 ObjectPtr GaussianSplatCloud::Copy()
@@ -340,6 +339,7 @@ ObjectPtr GaussianSplatCloud::Copy()
     New->floaterMinOpacity = floaterMinOpacity;
     New->bvh = bvh;
     New->bvhOrder = bvhOrder;
+    New->raySplatData = raySplatData;
     New->Trans = Copy_Transform(Trans);
     New->Texture = Copy_Textures(Texture);
     New->Interior_Texture = Copy_Textures(Interior_Texture);
@@ -416,6 +416,10 @@ void GaussianSplatCloud::Transform(const TRANSFORM *tr)
         projCache.valid = false;
         projCache.entries.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(vkFrameMutex);
+        vkFrame.reset();
+    }
     Compute_BBox();
 }
 
@@ -451,8 +455,15 @@ void GaussianSplatCloud::BuildAcceleration()
 {
     bvh.clear();
     bvhOrder.resize(points.size());
+    raySplatData.resize(points.size());
     for (size_t i = 0; i < points.size(); ++i)
+    {
         bvhOrder[i] = static_cast<int>(i);
+        BuildSigmaObject(points[i], raySplatData[i].covariance, false);
+        const TRANSFORM* sourceTransform =
+            (points[i].transformIndex < sourceTransforms.size()) ? &sourceTransforms[points[i].transformIndex] : nullptr;
+        raySplatData[i].normal = SplatNormalObject(points[i], sourceTransform);
+    }
     if (points.empty())
         return;
     bvh.reserve(points.size() * 2);
@@ -534,17 +545,19 @@ bool GaussianSplatCloud::RayAABB(const Vector3d& origin, const Vector3d& invDir,
     return tFar >= kDepthTolerance;
 }
 
-bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
+bool GaussianSplatCloud::SplatContribution(size_t pointIndex,
                                            const Vector3d& origin, const Vector3d& dir,
                                            DBL tSeg0, DBL tSeg1, DBL& tHit, DBL& weight,
-                                           TraceThreadData *Thread, bool useKerbl) const
+                                           TraceThreadData *Thread, bool useKerbl, const Vector3d planeAxes[2]) const
 {
+    const GaussianSplatPoint& sp = points[pointIndex];
     const DBL opac = Clamp01(sp.opacity * opacityScale);
     if (opac < opacityCutoff)
         return false;
 
     MATRIX Rmat;
-    QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
+    if (samples != 2)
+        QuatToMatrix(sp.qw, sp.qx, sp.qy, sp.qz, Rmat);
 
     const DBL sx = std::max(sp.scale[X], EPSILON);
     const DBL sy = std::max(sp.scale[Y], EPSILON);
@@ -557,19 +570,6 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             Rmat[0][1] * w[X] + Rmat[1][1] * w[Y] + Rmat[2][1] * w[Z],
             Rmat[0][2] * w[X] + Rmat[1][2] * w[Y] + Rmat[2][2] * w[Z]);
         out[X] /= sx; out[Y] /= sy; out[Z] /= sz;
-    };
-
-    auto buildSigmaWorld = [&](DBL Sigma[3][3]) {
-        const DBL s2x = sx * sx, s2y = sy * sy, s2z = sz * sz;
-        for (int i = 0; i < 3; ++i)
-        {
-            for (int j = 0; j < 3; ++j)
-            {
-                Sigma[i][j] = Rmat[i][0] * s2x * Rmat[j][0]
-                            + Rmat[i][1] * s2y * Rmat[j][1]
-                            + Rmat[i][2] * s2z * Rmat[j][2];
-            }
-        }
     };
 
     // --- samples <= 1: legacy 3D Mahalanobis peak (fast, underestimates opacity) ---
@@ -612,8 +612,7 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
             if (tHit < tSeg0 || tHit > tSeg1)
                 return false;
 
-            DBL SigmaW[3][3];
-            buildSigmaWorld(SigmaW);
+            const auto& SigmaW = raySplatData[pointIndex].covariance;
 
             // W rows = camera axes → Σ_cam = W Σ_world Wᵀ
             const Vector3d axes[3] = { proj->right, proj->up, proj->forward };
@@ -683,16 +682,9 @@ bool GaussianSplatCloud::SplatContribution(const GaussianSplatPoint& sp,
         const Vector3d mid = origin + dir * tHit;
         const Vector3d delta = sp.position - mid;
 
-        DBL Sigma[3][3];
-        buildSigmaWorld(Sigma);
-
-        Vector3d axis = (std::fabs(dir[Z]) < 0.9) ? Vector3d(0.0, 0.0, 1.0) : Vector3d(0.0, 1.0, 0.0);
-        Vector3d u = cross(dir, axis);
-        const DBL ul = u.length();
-        if (ul < EPSILON)
-            return false;
-        u /= ul;
-        Vector3d v = cross(dir, u);
+        const auto& Sigma = raySplatData[pointIndex].covariance;
+        const Vector3d& u = planeAxes[0];
+        const Vector3d& v = planeAxes[1];
 
         auto quadForm = [&](const Vector3d& e1, const Vector3d& e2) -> DBL {
             const Vector3d Se2(
@@ -896,6 +888,18 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     if (seg1 <= seg0)
         return false;
 
+    Vector3d planeAxes[2];
+    if (samples == 2)
+    {
+        const Vector3d axis = (std::fabs(dir[Z]) < 0.9) ? Vector3d(0.0, 0.0, 1.0) : Vector3d(0.0, 1.0, 0.0);
+        planeAxes[0] = cross(dir, axis);
+        const DBL length = planeAxes[0].length();
+        if (length < EPSILON)
+            return false;
+        planeAxes[0] /= length;
+        planeAxes[1] = cross(dir, planeAxes[0]);
+    }
+
     const int hitCap = std::min(kHardMaxHits, (maxHits > 0) ? maxHits : kDefaultMaxHits);
     std::vector<TraceThreadData::GaussianSplatHitRec>& hits = Thread->GaussianSplatHits;
     hits.clear();
@@ -909,19 +913,14 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     {
         const int ni = stack[--sp];
         const GaussianSplatBVHNode& node = bvh[static_cast<size_t>(ni)];
-        DBL tn, tf;
-        if (!RayAABB(origin, invDir, node.bmin, node.bmax, tn, tf))
-            continue;
-        if (tf < seg0 || tn > seg1)
-            continue;
         if (node.left < 0)
         {
             for (int i = 0; i < node.count && static_cast<int>(hits.size()) < hitCap; ++i)
             {
                 const int pi = bvhOrder[static_cast<size_t>(node.first + i)];
                 DBL tHit = 0, w = 0;
-                if (SplatContribution(points[static_cast<size_t>(pi)], origin, dir, seg0, seg1, tHit, w,
-                                      Thread, useKerbl))
+                if (SplatContribution(static_cast<size_t>(pi), origin, dir, seg0, seg1, tHit, w,
+                                      Thread, useKerbl, planeAxes))
                 {
                     TraceThreadData::GaussianSplatHitRec rec;
                     rec.t = tHit;
@@ -935,9 +934,11 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
         {
             DBL l0, l1, r0, r1;
             const bool hitL = RayAABB(origin, invDir, bvh[static_cast<size_t>(node.left)].bmin,
-                                      bvh[static_cast<size_t>(node.left)].bmax, l0, l1);
+                                      bvh[static_cast<size_t>(node.left)].bmax, l0, l1) &&
+                              l1 >= seg0 && l0 <= seg1;
             const bool hitR = RayAABB(origin, invDir, bvh[static_cast<size_t>(node.right)].bmin,
-                                      bvh[static_cast<size_t>(node.right)].bmax, r0, r1);
+                                      bvh[static_cast<size_t>(node.right)].bmax, r0, r1) &&
+                              r1 >= seg0 && r0 <= seg1;
             if (hitL && hitR)
             {
                 if (l0 > r0)
@@ -1002,9 +1003,7 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
         const DBL contrib = alpha * T;
         if (lightingMode == GaussianSplatLightingMode::Relight)
         {
-            const TRANSFORM *sourceTransform =
-                (spoint.transformIndex < sourceTransforms.size()) ? &sourceTransforms[spoint.transformIndex] : nullptr;
-            Vector3d normal = SplatNormalObject(spoint, sourceTransform);
+            Vector3d normal = raySplatData[static_cast<size_t>(hits[i].idx)].normal;
             if (dot(normal, viewDir) < 0.0)
                 normal = -normal;
             normalSum += normal * contrib;
@@ -1028,14 +1027,12 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     return true;
 }
 
-bool GaussianSplatCloud::EnsureVulkanFramebuffer(const GaussianSplatCamBasis& cam) const
+std::shared_ptr<const GaussianSplatVkFramebuffer> GaussianSplatCloud::PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam) const
 {
     if (!cam.camValid || renderBackend != GaussianSplatRenderBackend::Vulkan)
-        return false;
+        return nullptr;
     if (cam.screenW <= EPSILON || cam.screenH <= EPSILON)
-        return false;
-    if (!GaussianSplatVkAvailable())
-        return false;
+        return nullptr;
 
     std::lock_guard<std::mutex> lock(vkFrameMutex);
     auto sameVec = [](const Vector3d& a, const Vector3d& b) {
@@ -1043,7 +1040,7 @@ bool GaussianSplatCloud::EnsureVulkanFramebuffer(const GaussianSplatCamBasis& ca
                std::fabs(a[Y] - b[Y]) < 1.0e-9 &&
                std::fabs(a[Z] - b[Z]) < 1.0e-9;
     };
-    if (vkFrame != nullptr && vkFrame->valid &&
+    if (vkFrame != nullptr &&
         vkFrame->width == static_cast<int>(std::lround(cam.screenW)) &&
         vkFrame->height == static_cast<int>(std::lround(cam.screenH)) &&
         sameVec(vkFrame->origin, cam.origin) &&
@@ -1053,7 +1050,23 @@ bool GaussianSplatCloud::EnsureVulkanFramebuffer(const GaussianSplatCamBasis& ca
         std::fabs(vkFrame->fx - cam.fx) < 1.0e-6 &&
         std::fabs(vkFrame->fy - cam.fy) < 1.0e-6)
     {
-        return true;
+        return vkFrame;
+    }
+
+    auto frame = std::make_shared<GaussianSplatVkFramebuffer>();
+    frame->width = static_cast<int>(std::lround(cam.screenW));
+    frame->height = static_cast<int>(std::lround(cam.screenH));
+    frame->origin = cam.origin;
+    frame->right = cam.right;
+    frame->up = cam.up;
+    frame->forward = cam.forward;
+    frame->fx = cam.fx;
+    frame->fy = cam.fy;
+    if (!GaussianSplatVkAvailable())
+    {
+        std::fprintf(stderr, "gaussian_splat vulkan: initialization unavailable; using CPU projection for this camera\n");
+        vkFrame = frame;
+        return vkFrame;
     }
 
     std::vector<GaussianSplatGpuSplat> gpuSplats;
@@ -1126,14 +1139,17 @@ bool GaussianSplatCloud::EnsureVulkanFramebuffer(const GaussianSplatCamBasis& ca
         gpuSplats.push_back(g);
     }
 
-    if (vkFrame == nullptr)
-        vkFrame = new GaussianSplatVkFramebuffer();
-    if (!GaussianSplatVkRenderFrame(*this, cam, gpuSplats, *vkFrame))
+    if (gpuSplats.empty())
     {
-        vkFrame->valid = false;
-        return false;
+        const size_t pixels = static_cast<size_t>(frame->width) * static_cast<size_t>(frame->height);
+        frame->rgba.assign(pixels * 4, 0.0f);
+        frame->depth.assign(pixels, 0.0f);
+        frame->valid = true;
     }
-    return vkFrame->valid;
+    else if (!GaussianSplatVkRenderFrame(*this, cam, gpuSplats, *frame))
+        std::fprintf(stderr, "gaussian_splat vulkan: frame dispatch failed; using CPU projection for this camera\n");
+    vkFrame = frame;
+    return vkFrame;
 }
 
 bool GaussianSplatCloud::EnsureProjectedCache(const GaussianSplatCamBasis& cam) const
@@ -1529,16 +1545,21 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         cam.pixelValid = true;
 
         bool gotSeg = false;
+        auto frame = Thread->GaussianSplatFrames.find(this);
         if (renderBackend == GaussianSplatRenderBackend::Vulkan &&
-            EnsureVulkanFramebuffer(cam))
+            frame == Thread->GaussianSplatFrames.end())
+            frame = Thread->GaussianSplatFrames.emplace(this, PrepareVulkanFramebuffer(cam)).first;
+        if (renderBackend == GaussianSplatRenderBackend::Vulkan &&
+            frame != Thread->GaussianSplatFrames.end() &&
+            frame->second != nullptr && frame->second->valid)
         {
-            std::lock_guard<std::mutex> vkLock(vkFrameMutex);
-            gotSeg = (vkFrame != nullptr) &&
-                     GaussianSplatVkSamplePixel(*vkFrame, cam.screenU, cam.screenV, seg);
+            gotSeg = GaussianSplatVkSamplePixel(*frame->second, cam.screenU, cam.screenV, seg);
+            // A transparent pixel in a completed GPU frame is a miss, not a backend failure.
+            if (!gotSeg)
+                return false;
         }
-        if (!gotSeg && EnsureProjectedCache(cam) &&
-            CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread))
-            gotSeg = true;
+        else if (EnsureProjectedCache(cam))
+            gotSeg = CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread);
         if (gotSeg)
         {
             // View depth along camera forward → ray distance.

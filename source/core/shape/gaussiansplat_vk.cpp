@@ -24,7 +24,7 @@ namespace pov
 
 namespace
 {
-GaussianSplatVkTiming gLastTiming;
+thread_local GaussianSplatVkTiming gLastTiming;
 } // namespace
 
 #ifndef POV_HAVE_VULKAN
@@ -131,6 +131,7 @@ struct DeviceContext
 };
 
 std::mutex gDevMutex;
+std::mutex gSubmitMutex;
 DeviceContext gDev;
 
 const char *DeviceTypeName(VkPhysicalDeviceType t)
@@ -577,6 +578,7 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     if (!InitDevice())
         return false;
 
+    std::lock_guard<std::mutex> lock(gSubmitMutex);
     DeviceContext &d = gDev;
     const auto hostT0 = std::chrono::steady_clock::now();
     const bool useTs = (d.queryPool != VK_NULL_HANDLE);

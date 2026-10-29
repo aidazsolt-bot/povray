@@ -299,6 +299,8 @@ void TracePixel::SetupCamera(const Camera& cam)
         TraceThreadData::GaussianSplatProj& proj = threadData->GaussianSplatCam;
         proj.camValid = false;
         proj.pixelValid = false;
+        proj.screenW = proj.screenH = 0;
+        threadData->GaussianSplatFrames.clear();
         if (camera.Type == PERSPECTIVE_CAMERA)
         {
             const DBL lenR = cameraRight.length();
@@ -394,6 +396,7 @@ bool TracePixel::CreateCameraRay(Ray& ray, DBL x, DBL y, DBL width, DBL height, 
             if (threadData->GaussianSplatCam.camValid && width > EPSILON && height > EPSILON)
             {
                 TraceThreadData::GaussianSplatProj& proj = threadData->GaussianSplatCam;
+                const bool prepareFrame = (proj.screenW != width || proj.screenH != height);
                 const DBL lenR = cameraRight.length();
                 const DBL lenU = cameraUp.length();
                 const DBL lenD = cameraDirection.length();
@@ -404,6 +407,8 @@ bool TracePixel::CreateCameraRay(Ray& ray, DBL x, DBL y, DBL width, DBL height, 
                 proj.screenW = width;
                 proj.screenH = height;
                 proj.pixelValid = true;
+                if (prepareFrame)
+                    threadData->GaussianSplatFrames.clear();
             }
 
             // Do focal blurring (by Dan Farmer).

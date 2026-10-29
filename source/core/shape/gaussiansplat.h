@@ -19,6 +19,7 @@
 #include "core/scene/object.h"
 
 #include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -182,8 +183,8 @@ class GaussianSplatCloud final : public NonsolidObject
         };
         mutable ProjCache projCache;
         mutable std::mutex projCacheMutex;
-        /// Vulkan primary framebuffer (valid when renderBackend==Vulkan and build succeeded).
-        mutable GaussianSplatVkFramebuffer *vkFrame;
+        /// Immutable camera snapshot shared with render threads.
+        mutable std::shared_ptr<const GaussianSplatVkFramebuffer> vkFrame;
         mutable std::mutex vkFrameMutex;
 
         GaussianSplatCloud();
@@ -235,21 +236,28 @@ class GaussianSplatCloud final : public NonsolidObject
         bool CompositeProjectedPixel(DBL screenU, DBL screenV,
                                      GaussianSplatSegmentResult& out, TraceThreadData *Thread) const;
 
-        /// Build/reuse Vulkan compute framebuffer for this camera (thread-safe).
-        /// Returns false if Vulkan unavailable or dispatch failed (caller uses CPU).
-        bool EnsureVulkanFramebuffer(const GaussianSplatCamBasis& cam) const;
+        /// Prepare once per camera/size, before tracing pixels. Invalid snapshots
+        /// retain failed attempts so render threads use CPU without retrying per pixel.
+        std::shared_ptr<const GaussianSplatVkFramebuffer> PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam) const;
 
         /// Binary opacity-voxel occupancy (SuperSplat collision defaults) + marching
         /// cubes. Triangle pigments/normals are computed here via EvalColour (not Assimp).
         Mesh *BuildSurfaceMesh() const;
 
     private:
+        struct RaySplatData
+        {
+            DBL covariance[3][3];
+            Vector3d normal;
+        };
+        std::vector<RaySplatData> raySplatData;
+
         void BuildBVHRecursive(int nodeIndex, int begin, int end, int depth);
         bool RayAABB(const Vector3d& origin, const Vector3d& invDir, const Vector3d& bmin, const Vector3d& bmax,
                      DBL& tNear, DBL& tFar) const;
-        bool SplatContribution(const GaussianSplatPoint& sp, const Vector3d& origin, const Vector3d& dir,
+        bool SplatContribution(size_t pointIndex, const Vector3d& origin, const Vector3d& dir,
                                DBL tSeg0, DBL tSeg1, DBL& tHit, DBL& weight,
-                               TraceThreadData *Thread, bool useKerbl) const;
+                               TraceThreadData *Thread, bool useKerbl, const Vector3d planeAxes[2]) const;
         void BuildProjectedCache(const GaussianSplatCamBasis& cam) const;
 };
 

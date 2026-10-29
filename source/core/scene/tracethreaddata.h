@@ -44,6 +44,7 @@
 
 // C++ standard header files
 #include <memory>
+#include <map>
 #include <stack>
 #include <vector>
 
@@ -72,6 +73,8 @@ namespace pov
 using namespace pov_base;
 
 class PhotonMap;
+class GaussianSplatCloud;
+struct GaussianSplatVkFramebuffer;
 struct Blob_Interval_Struct;
 
 /// Class holding parser thread specific data.
@@ -171,6 +174,7 @@ class TraceThreadData : public ThreadData
                 screenW(0.0), screenH(0.0) {}
         };
         GaussianSplatProj GaussianSplatCam;
+        std::map<const GaussianSplatCloud*, std::shared_ptr<const GaussianSplatVkFramebuffer>> GaussianSplatFrames;
 
         // data for waves and ripples pattern
         unsigned int numberOfWaves;
