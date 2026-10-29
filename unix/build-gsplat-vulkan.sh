@@ -21,13 +21,20 @@ COMMON=(
 )
 
 cd "$ROOT/source"
-g++ "${COMMON[@]}" -c -o core/shape/gaussiansplat_vk.o core/shape/gaussiansplat_vk.cpp
-g++ "${COMMON[@]}" -c -o core/shape/gaussiansplat.o core/shape/gaussiansplat.cpp
-g++ "${COMMON[@]}" -c -o parser/reservedwords.o parser/reservedwords.cpp
-g++ "${COMMON[@]}" -c -o parser/parser_assimp.o parser/parser_assimp.cpp
-g++ "${COMMON[@]}" -c -o backend/povray.o backend/povray.cpp
-ar cru libpovray.a core/shape/gaussiansplat.o core/shape/gaussiansplat_vk.o \
-  parser/reservedwords.o parser/parser_assimp.o backend/povray.o
+# Core gsplat + anything that touches TraceThreadData / Vulkan frame publish.
+for src in \
+  core/shape/gaussiansplat.cpp \
+  core/shape/gaussiansplat_vk.cpp \
+  core/scene/tracethreaddata.cpp \
+  core/render/trace.cpp \
+  core/render/tracepixel.cpp \
+  parser/reservedwords.cpp \
+  parser/parser_assimp.cpp \
+  backend/povray.cpp
+do
+  g++ "${COMMON[@]}" -c -o "${src%.cpp}.o" "$src"
+  ar cru libpovray.a "${src%.cpp}.o"
+done
 ranlib libpovray.a
 
 cd "$ROOT/unix"

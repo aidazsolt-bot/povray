@@ -431,8 +431,7 @@ void GaussianSplatCloud::Compute_BBox()
         return;
     }
 
-    if (bvh.empty())
-        BuildAcceleration();
+    BuildAcceleration();
 
     Vector3d bmin = bvh[0].bmin;
     Vector3d bmax = bvh[0].bmax;
@@ -453,7 +452,10 @@ void GaussianSplatCloud::Compute_BBox()
 
 void GaussianSplatCloud::BuildAcceleration()
 {
-    bvh.clear();
+    std::lock_guard<std::mutex> lock(accelMutex);
+    if (!bvh.empty())
+        return;
+
     bvhOrder.resize(points.size());
     raySplatData.resize(points.size());
     for (size_t i = 0; i < points.size(); ++i)
@@ -1504,8 +1506,7 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
 {
     if (points.empty())
         return false;
-    if (bvh.empty())
-        BuildAcceleration();
+    BuildAcceleration();
 
     BasicRay localRay(ray);
     DBL lenScale = 1.0;
@@ -1545,20 +1546,20 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         cam.pixelValid = true;
 
         bool gotSeg = false;
-        auto frame = Thread->GaussianSplatFrames.find(this);
-        if (renderBackend == GaussianSplatRenderBackend::Vulkan &&
-            frame == Thread->GaussianSplatFrames.end())
-            frame = Thread->GaussianSplatFrames.emplace(this, PrepareVulkanFramebuffer(cam)).first;
-        if (renderBackend == GaussianSplatRenderBackend::Vulkan &&
-            frame != Thread->GaussianSplatFrames.end() &&
-            frame->second != nullptr && frame->second->valid)
+        if (renderBackend == GaussianSplatRenderBackend::Vulkan)
         {
-            gotSeg = GaussianSplatVkSamplePixel(*frame->second, cam.screenU, cam.screenV, seg);
-            // A transparent pixel in a completed GPU frame is a miss, not a backend failure.
-            if (!gotSeg)
-                return false;
+            // Shared immutable snapshot under vkFrameMutex (no per-thread map).
+            const std::shared_ptr<const GaussianSplatVkFramebuffer> snap =
+                PrepareVulkanFramebuffer(cam);
+            if (snap != nullptr && snap->valid)
+            {
+                gotSeg = GaussianSplatVkSamplePixel(*snap, cam.screenU, cam.screenV, seg);
+                // A transparent pixel in a completed GPU frame is a miss, not a backend failure.
+                if (!gotSeg)
+                    return false;
+            }
         }
-        else if (EnsureProjectedCache(cam))
+        if (!gotSeg && EnsureProjectedCache(cam))
             gotSeg = CompositeProjectedPixel(cam.screenU, cam.screenV, seg, Thread);
         if (gotSeg)
         {

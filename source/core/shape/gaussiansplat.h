@@ -186,6 +186,8 @@ class GaussianSplatCloud final : public NonsolidObject
         /// Immutable camera snapshot shared with render threads.
         mutable std::shared_ptr<const GaussianSplatVkFramebuffer> vkFrame;
         mutable std::mutex vkFrameMutex;
+        /// Serializes first-time BVH / raySplatData build (render threads race otherwise).
+        mutable std::mutex accelMutex;
 
         GaussianSplatCloud();
         virtual ~GaussianSplatCloud() override;
@@ -206,7 +208,7 @@ class GaussianSplatCloud final : public NonsolidObject
         /// True if scene texture finish or interior IOR should drive shading.
         bool WantsMaterialShading() const;
 
-        /// Build BVH after points/restCoeffs are filled. Call before render.
+        /// Build BVH after points/restCoeffs are filled. Thread-safe; no-op if already built.
         void BuildAcceleration();
 
         /// Evaluate SH colour. @p viewDir is camera→splat in the SH/authoring frame

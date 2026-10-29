@@ -2802,8 +2802,7 @@ void Trace::IntegrateGaussianSplatVolumes(const Ray& ray, const Intersection& be
         if (cloud->giWeight <= EPSILON)
             continue;
 
-        if (cloud->bvh.empty())
-            cloud->BuildAcceleration();
+        cloud->BuildAcceleration();
 
         BasicRay localRay(origin, dir);
         DBL lenScale = 1.0;
