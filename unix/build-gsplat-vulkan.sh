@@ -21,19 +21,28 @@ COMMON=(
 )
 
 cd "$ROOT/source"
-# Core gsplat + anything that touches TraceThreadData / Vulkan frame publish.
-for src in \
-  core/shape/gaussiansplat.cpp \
-  core/shape/gaussiansplat_vk.cpp \
-  core/scene/tracethreaddata.cpp \
-  core/render/trace.cpp \
-  core/render/tracepixel.cpp \
-  parser/reservedwords.cpp \
-  parser/parser.cpp \
-  parser/parser_assimp.cpp \
-  backend/povray.cpp \
-  backend/support/task.cpp
-do
+# Rebuild all parser TUs whenever Assimp/OBJ flags change (TokenId enum must stay
+# in sync across reservedwords + tokenizer + every parser_*.cpp).
+# Also refresh TraceThreadData consumers (view/mesh/csg) to avoid ABI SIGSEGV
+# after incremental gsplat edits.
+mapfile -t REBUILD_SRCS < <(
+  {
+    ls parser/*.cpp
+    printf '%s\n' \
+      core/shape/gaussiansplat.cpp \
+      core/shape/gaussiansplat_vk.cpp \
+      core/shape/mesh.cpp \
+      core/shape/csg.cpp \
+      core/scene/tracethreaddata.cpp \
+      core/render/trace.cpp \
+      core/render/tracepixel.cpp \
+      backend/scene/view.cpp \
+      backend/povray.cpp \
+      backend/support/task.cpp
+  } | sort -u
+)
+for src in "${REBUILD_SRCS[@]}"; do
+  echo "  compile $src"
   g++ "${COMMON[@]}" -c -o "${src%.cpp}.o" "$src"
   ar cru libpovray.a "${src%.cpp}.o"
 done
