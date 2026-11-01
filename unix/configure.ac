@@ -68,6 +68,8 @@ m4_include([unix/config/ax_check_libjpeg.m4])
 m4_include([unix/config/ax_check_libsdl.m4])
 m4_include([unix/config/ax_check_libtiff.m4])
 m4_include([unix/config/ax_check_openexr.m4])
+m4_include([unix/config/ax_check_assimp.m4])
+m4_include([unix/config/ax_check_vulkan_gsplat.m4])
 m4_include([unix/config/ax_compare_version.m4])
 m4_include([unix/config/ax_compiler_vendor.m4])
 m4_include([unix/config/ax_compiler_version.m4])
@@ -98,6 +100,8 @@ AX_ARG_ENABLE([--disable-pipe],            [disable usage of pipes during compil
 AX_ARG_ENABLE([--disable-strip],           [disable stripping all symbols from the object files (larger binary)])
 AX_ARG_ENABLE([--disable-shared],          [disable linking with shared libraries (same as --enable-static)])
 AX_ARG_ENABLE([--disable-io-restrictions], [disable POV-Ray's mechanism for control of I/O operations])
+AX_ARG_ENABLE([--enable-assimp],           [enable Assimp model import (meshes, materials, Gaussian splats)])
+AX_ARG_ENABLE([--enable-vulkan-gsplat],    [enable Vulkan compute for Gaussian splat rendering])
 
 AX_ARG_WITH([--without-cygwin-dll], [],    [don't link with the Cygwin DLL (MinGW required)])
 AX_ARG_WITH([--with-zlib],          [DIR], [use the ZLIB library (in directory DIR)])
@@ -106,7 +110,9 @@ AX_ARG_WITH([--with-libjpeg],       [DIR], [use the JPEG library (in directory D
 AX_ARG_WITH([--with-libtiff],       [DIR], [use the TIFF library (in directory DIR)])
 AX_ARG_WITH([--with-libsdl],        [DIR], [use the SDL library (in directory DIR)])
 AX_ARG_WITH([--with-libmkl],        [DIR], [use the Intel(R) Math Kernel Library (in directory DIR)])
-AX_ARG_WITH([--with-openexr],       [DIR], [use the OpenEXR library (in directory DIR)]) 
+AX_ARG_WITH([--with-openexr],       [DIR], [use the OpenEXR library (in directory DIR)])
+AX_ARG_WITH([--with-assimp],        [DIR], [Assimp root (include/ + build-host/ or lib/; implies --enable-assimp)])
+AX_ARG_WITH([--with-vulkan-headers],[DIR], [Vulkan-Headers root with include/vulkan/ (for --enable-vulkan-gsplat)])
 
 AC_ARG_VAR([COMPILED_BY], [customize the "unofficial version" message])
 AC_ARG_VAR([NON_REDISTRIBUTABLE_BUILD], [see the installation documentation])
@@ -416,6 +422,53 @@ fi
 if test x"$pov_libopenexr" != x"ok"; then
   AC_MSG_WARN([all program features using the OpenEXR library are disabled])
   AC_DEFINE([OPENEXR_MISSING], [], [Don't use OpenEXR.])
+fi
+
+# Assimp model import (optional; meshes / materials / Gaussian splats).
+# Default off. --with-assimp=DIR implies enable. Native mesh { obj } stays off.
+pov_assimp_msg="disabled"
+AC_MSG_CHECKING([whether to enable Assimp import])
+pov_want_assimp=no
+if test x"$enable_assimp" = x"yes"; then
+  pov_want_assimp=yes
+fi
+if test x"$with_assimp" != x"" && test x"$with_assimp" != x"no"; then
+  pov_want_assimp=yes
+fi
+if test x"$pov_want_assimp" != x"yes"; then
+  AC_MSG_RESULT([no])
+else
+  AC_MSG_RESULT([yes])
+  ax_assimp_root=""
+  if test x"$with_assimp" != x"" && test x"$with_assimp" != x"yes" && test x"$with_assimp" != x"no"; then
+    ax_assimp_root="$with_assimp"
+  fi
+  AX_CHECK_ASSIMP([$ax_assimp_root])
+  if test x"$ax_check_assimp" = x"ok"; then
+    CPPFLAGS="-DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1 $CPPFLAGS"
+    pov_assimp_msg="enabled"
+  else
+    AC_MSG_ERROR([Assimp requested but not usable ($ax_check_assimp). Set --with-assimp=DIR.])
+  fi
+fi
+
+# Vulkan Gaussian splat compute (optional; uses in-tree volk + libvulkan).
+pov_vulkan_gsplat_msg="disabled"
+AC_MSG_CHECKING([whether to enable Vulkan Gaussian splat compute])
+if test x"$enable_vulkan_gsplat" != x"yes"; then
+  AC_MSG_RESULT([no])
+else
+  AC_MSG_RESULT([yes])
+  ax_vk_headers=""
+  if test x"$with_vulkan_headers" != x"" && test x"$with_vulkan_headers" != x"yes" && test x"$with_vulkan_headers" != x"no"; then
+    ax_vk_headers="$with_vulkan_headers"
+  fi
+  AX_CHECK_VULKAN_GSPLAT([$ax_vk_headers])
+  if test x"$ax_check_vulkan_gsplat" = x"ok"; then
+    pov_vulkan_gsplat_msg="enabled"
+  else
+    AC_MSG_ERROR([Vulkan gsplat requested but not usable ($ax_check_vulkan_gsplat). Set --with-vulkan-headers=DIR.])
+  fi
 fi
 
 # Unix-specific display libraries.
@@ -1264,6 +1317,8 @@ AC_MSG_RESULT([Built-in features:
   X Window display:          ${pov_xwin_msg}
   Supported image formats:   $pov_img_fmt_builtin $pov_img_fmt_enabled
   Unsupported image formats: $pov_img_fmt_disabled
+  Assimp model import:       ${pov_assimp_msg}
+  Vulkan Gaussian splats:    ${pov_vulkan_gsplat_msg}
 
 Compilation settings:
   Build architecture:  $build 

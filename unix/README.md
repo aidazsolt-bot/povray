@@ -27,6 +27,26 @@ To enable the render preview display also pre-install:
 
     libsdl-dev
 
+Optional Assimp model import (meshes, materials, Gaussian splats) and
+Vulkan Gaussian-splat compute are off by default. Enable via configure,
+for example with an Arris Assimp tree and Khronos Vulkan-Headers:
+
+    ./configure COMPILED_BY="your name <email>" \
+      --enable-assimp \
+      --with-assimp=/path/to/Assimp-Arris.Git.2026 \
+      --enable-vulkan-gsplat \
+      --with-vulkan-headers=/path/to/vulkan-headers
+
+`--with-assimp=DIR` alone also enables Assimp. Native experimental
+`mesh { obj }` stays off; use `assimp { }`, `gaussian_splat { }`, or
+`mesh { assimp }`. After configure, use plain `make` / `make -j` so
+header dependencies rebuild the right objects (no helper rebuild scripts).
+
+SPIR-V for the Vulkan path is embedded under
+`source/core/shape/shaders/*_spv.inc`. Regenerate only after editing
+`.comp` sources: `python3 source/core/shape/shaders/embed_spv.py`
+(needs `glslc`).
+
 The --with-x ./configure option is currently meaningless as no X11
 display option is presently implemented.
 

@@ -467,6 +467,9 @@ AM_CPPFLAGS = \\
 # Libraries to link with.
 # Beware: order does matter!
 # TODO - Having vfe/libvfe.a twice in this list is a bit of a hackish way to cope with cyclic dependencies.
+# Optional Assimp / Vulkan gsplat: ./configure --enable-assimp --with-assimp=DIR
+# and/or --enable-vulkan-gsplat --with-vulkan-headers=DIR (flags land in CPPFLAGS/LIBS).
+# SPIR-V refresh: python3 source/core/shape/shaders/embed_spv.py (needs glslc).
 LDADD = \\
   \$(top_builddir)/vfe/libvfe.a \\
   \$(top_builddir)/source/libpovray.a \\
