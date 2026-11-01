@@ -265,3 +265,6 @@ $RECYCLE.BIN/
 
 # MinGW cross-build output
 /build-mingw/
+
+# Local scratch / smoke renders (not for git)
+/tmp/

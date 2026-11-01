@@ -173,6 +173,17 @@ bool FileReadable(const std::string &path)
     return in.good();
 }
 
+/// File path and/or Assimp embedded texture (*N) resolved for loading.
+struct AssimpMapRef
+{
+    std::string path;           ///< On-disk path when non-empty.
+    const aiTexture *embedded;  ///< Scene-owned buffer when non-null.
+    std::string label;          ///< Original Assimp path string (for diagnostics).
+
+    AssimpMapRef() : embedded(nullptr) {}
+    bool Ok() const { return embedded != nullptr || !path.empty(); }
+};
+
 /// Resolve Assimp texture filename to an on-disk path (model dir + extension fallbacks).
 std::string ResolveAssimpTextureFile(Parser *parser, const std::string &modelDir, const char *texPath)
 {
@@ -180,7 +191,6 @@ std::string ResolveAssimpTextureFile(Parser *parser, const std::string &modelDir
         return std::string();
 
     std::string raw(texPath);
-    // Embedded textures (*0, *1, ...) not supported yet.
     if (raw[0] == '*')
         return std::string();
 
@@ -195,12 +205,10 @@ std::string ResolveAssimpTextureFile(Parser *parser, const std::string &modelDir
             candidates.push_back(p);
     };
 
-    // Absolute / as-given path first
     add(raw);
     add(modelDir + "/" + raw);
     add(modelDir + "/" + baseName);
 
-    // Extension swaps on basename in model directory (Assimp often says .tga, assets are .jpg)
     for (const char **e = kExts; *e != nullptr; ++e)
     {
         if ((*e)[0] == '\0')
@@ -232,13 +240,117 @@ int FiletypeFromPath(const std::string &path)
     return (mask != NO_FILE) ? mask : JPEG_FILE;
 }
 
-ImageData *LoadAssimpImageData(Parser *parser, const std::string &imagePath, bool gammaCorrect)
+Image::ImageFileType ImageFileTypeFromAssimpHint(const aiTexture *tex)
 {
-    ImageData *image = Create_Image();
+    if (tex == nullptr)
+        return Image::PNG;
+    if (tex->CheckFormat("jpg") || tex->CheckFormat("jpeg"))
+        return Image::JPEG;
+    if (tex->CheckFormat("png"))
+        return Image::PNG;
+    if (tex->CheckFormat("tga") || tex->CheckFormat("tpic"))
+        return Image::TGA;
+    if (tex->CheckFormat("bmp"))
+        return Image::BMP;
+    if (tex->CheckFormat("tif") || tex->CheckFormat("tiff"))
+        return Image::TIFF;
+    if (tex->CheckFormat("gif"))
+        return Image::GIF;
+    if (tex->CheckFormat("hdr"))
+        return Image::HDR;
+    if (tex->CheckFormat("exr"))
+        return Image::EXR;
+    // DamagedHelmet.glb and similar often leave an empty hint for PNG/JPEG payloads;
+    // sniff common magic bytes.
+    if (tex->mHeight == 0 && tex->pcData != nullptr && tex->mWidth >= 4)
+    {
+        const unsigned char *b = reinterpret_cast<const unsigned char *>(tex->pcData);
+        if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47)
+            return Image::PNG;
+        if (b[0] == 0xFF && b[1] == 0xD8)
+            return Image::JPEG;
+        if (b[0] == 'B' && b[1] == 'M')
+            return Image::BMP;
+    }
+    return Image::PNG;
+}
+
+ImageReadOptions MakeAssimpImageReadOptions(Parser *parser, bool gammaCorrect)
+{
     ImageReadOptions options;
     options.gammacorrect = gammaCorrect;
     if (gammaCorrect && parser->sceneData->workingGamma)
         options.workingGamma = SimpleGammaCurvePtr(parser->sceneData->workingGamma);
+    return options;
+}
+
+ImageData *WrapAssimpImage(Image *decoded)
+{
+    ImageData *image = Create_Image();
+    image->data = decoded;
+    image->Use = USE_COLOUR;
+    image->Map_Type = PLANAR_MAP;
+    image->iwidth = image->data->GetWidth();
+    image->iheight = image->data->GetHeight();
+    image->width = static_cast<SNGL>(image->iwidth);
+    image->height = static_cast<SNGL>(image->iheight);
+    return image;
+}
+
+ImageData *LoadAssimpImageFromEmbedded(Parser *parser, const aiTexture *tex, const char *label, bool gammaCorrect)
+{
+    if (tex == nullptr || tex->pcData == nullptr)
+        parser->Error("Assimp embedded texture '%s' has no data.", label ? label : "*?");
+
+    ImageReadOptions options = MakeAssimpImageReadOptions(parser, gammaCorrect);
+    Image *decoded = nullptr;
+
+    if (tex->mHeight == 0)
+    {
+        // Compressed payload (png/jpg/...) - decode in memory via IMemStream.
+        const size_t nbytes = static_cast<size_t>(tex->mWidth);
+        IMemStream stream(reinterpret_cast<const unsigned char *>(tex->pcData), nbytes,
+                          label ? label : "assimp_embedded");
+        const Image::ImageFileType type = ImageFileTypeFromAssimpHint(tex);
+        try
+        {
+            decoded = Image::Read(type, &stream, options);
+        }
+        catch (...)
+        {
+            parser->Error("Cannot decode Assimp embedded texture '%s' (hint '%.8s').",
+                          label ? label : "*?", tex->achFormatHint);
+        }
+    }
+    else
+    {
+        // Uncompressed ARGB8888 (or similar) texels.
+        const unsigned w = tex->mWidth;
+        const unsigned h = tex->mHeight;
+        decoded = Image::Create(w, h, ImageDataType::RGBA_Int8, false);
+        for (unsigned y = 0; y < h; ++y)
+        {
+            for (unsigned x = 0; x < w; ++x)
+            {
+                const aiTexel &t = tex->pcData[y * w + x];
+                decoded->SetRGBAValue(x, y,
+                                      static_cast<unsigned int>(t.r),
+                                      static_cast<unsigned int>(t.g),
+                                      static_cast<unsigned int>(t.b),
+                                      static_cast<unsigned int>(t.a));
+            }
+        }
+    }
+
+    if (decoded == nullptr)
+        parser->Error("Cannot decode Assimp embedded texture '%s'.", label ? label : "*?");
+    return WrapAssimpImage(decoded);
+}
+
+ImageData *LoadAssimpImageData(Parser *parser, const std::string &imagePath, bool gammaCorrect)
+{
+    ImageData *image = Create_Image();
+    ImageReadOptions options = MakeAssimpImageReadOptions(parser, gammaCorrect);
 
     const int filetype = FiletypeFromPath(imagePath);
     try
@@ -265,9 +377,19 @@ ImageData *LoadAssimpImageData(Parser *parser, const std::string &imagePath, boo
     return image;
 }
 
-TEXTURE *MakeImageMappedTexture(Parser *parser, const std::string &imagePath, DBL ambient)
+ImageData *LoadAssimpMapRef(Parser *parser, const AssimpMapRef &ref, bool gammaCorrect)
 {
-    ImageData *image = LoadAssimpImageData(parser, imagePath, true);
+    if (ref.embedded != nullptr)
+        return LoadAssimpImageFromEmbedded(parser, ref.embedded, ref.label.c_str(), gammaCorrect);
+    if (!ref.path.empty())
+        return LoadAssimpImageData(parser, ref.path, gammaCorrect);
+    parser->Error("Internal error: empty Assimp texture map ref.");
+    return nullptr;
+}
+
+TEXTURE *MakeImageMappedTexture(Parser *parser, const AssimpMapRef &ref, DBL ambient)
+{
+    ImageData *image = LoadAssimpMapRef(parser, ref, true);
 
     TEXTURE *tex = Create_Texture();
     Destroy_Pigment(tex->Pigment);
@@ -287,9 +409,9 @@ TEXTURE *MakeImageMappedTexture(Parser *parser, const std::string &imagePath, DB
     return tex;
 }
 
-void AttachAssimpBumpMap(Parser *parser, TEXTURE *tex, const std::string &imagePath, DBL amount)
+void AttachAssimpBumpMap(Parser *parser, TEXTURE *tex, const AssimpMapRef &ref, DBL amount)
 {
-    ImageData *image = LoadAssimpImageData(parser, imagePath, false);
+    ImageData *image = LoadAssimpMapRef(parser, ref, false);
     TNORMAL *tn = Create_Tnormal();
     tn->Type = BITMAP_PATTERN;
     tn->Amount = static_cast<SNGL>(amount);
@@ -303,28 +425,54 @@ void AttachAssimpBumpMap(Parser *parser, TEXTURE *tex, const std::string &imageP
     tex->Tnormal = tn;
 }
 
-std::string TryGetAssimpTexture(Parser *parser, const aiMaterial *mat, const std::string &modelDir,
-                                aiTextureType type, const char *label, bool &usedImageMap)
+AssimpMapRef TryGetAssimpTexture(Parser *parser, const aiScene *scene, const aiMaterial *mat,
+                                 const std::string &modelDir, aiTextureType type, const char *label,
+                                 bool &usedImageMap)
 {
+    AssimpMapRef ref;
     if (mat == nullptr)
-        return std::string();
+        return ref;
     aiString texPath;
     if (mat->GetTexture(type, 0, &texPath) != AI_SUCCESS || texPath.length == 0)
-        return std::string();
-    const std::string resolved = ResolveAssimpTextureFile(parser, modelDir, texPath.C_Str());
-    if (resolved.empty())
+        return ref;
+    ref.label = texPath.C_Str();
+
+    // Embedded GLB textures: "*0", "*1", ...
+    if (ref.label[0] == '*')
+    {
+        if (scene == nullptr)
+        {
+            parser->Warning("Assimp %s map '%s' is embedded but scene is null.", label, ref.label.c_str());
+            return AssimpMapRef();
+        }
+        ref.embedded = scene->GetEmbeddedTexture(ref.label.c_str());
+        if (ref.embedded == nullptr)
+        {
+            parser->Warning("Assimp %s map '%s' embedded lookup failed.", label, ref.label.c_str());
+            return AssimpMapRef();
+        }
+        parser->Warning("Assimp %s map '%s' -> embedded (hint '%.8s', %u bytes/%ux%u).",
+                        label, ref.label.c_str(), ref.embedded->achFormatHint,
+                        ref.embedded->mHeight == 0 ? ref.embedded->mWidth : 0,
+                        ref.embedded->mWidth, ref.embedded->mHeight);
+        usedImageMap = true;
+        return ref;
+    }
+
+    ref.path = ResolveAssimpTextureFile(parser, modelDir, texPath.C_Str());
+    if (ref.path.empty())
     {
         parser->Warning("Assimp %s map '%s' not found next to model (dir '%s').",
                         label, texPath.C_Str(), modelDir.c_str());
-        return std::string();
+        return AssimpMapRef();
     }
-    parser->Warning("Assimp %s map '%s' -> '%s'.", label, texPath.C_Str(), resolved.c_str());
+    parser->Warning("Assimp %s map '%s' -> '%s'.", label, texPath.C_Str(), ref.path.c_str());
     usedImageMap = true;
-    return resolved;
+    return ref;
 }
 
-TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiMaterial *mat, const std::string &modelDir,
-                                       bool &usedImageMap)
+TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiScene *scene, const aiMaterial *mat,
+                                       const std::string &modelDir, bool &usedImageMap)
 {
     aiColor3D kd(0.8f, 0.8f, 0.8f);
     aiColor3D ka(0.1f, 0.1f, 0.1f);
@@ -343,12 +491,12 @@ TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiMaterial *mat, co
     ambient = Clamp01(ambient);
 
     TEXTURE *tex = nullptr;
-    std::string diffusePath = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_DIFFUSE, "diffuse", usedImageMap);
-    if (diffusePath.empty())
-        diffusePath = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_BASE_COLOR, "base_color", usedImageMap);
+    AssimpMapRef diffuse = TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_DIFFUSE, "diffuse", usedImageMap);
+    if (!diffuse.Ok())
+        diffuse = TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_BASE_COLOR, "base_color", usedImageMap);
 
-    if (!diffusePath.empty())
-        tex = MakeImageMappedTexture(parser, diffusePath, ambient);
+    if (diffuse.Ok())
+        tex = MakeImageMappedTexture(parser, diffuse, ambient);
     else
         tex = MakeColourTexture(kd.r, kd.g, kd.b, Clamp01(1.0 - opacity), ambient);
 
@@ -363,35 +511,36 @@ TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiMaterial *mat, co
             tex->Finish->Roughness = static_cast<SNGL>(1.0 / (1.0 + shininess / 10.0));
     }
 
-    // Extra maps Assimp exposes (specular image used as notice; bump/height applied)
-    std::string unusedFlag = std::string();
     bool mapFlag = false;
-    const std::string specularMap = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_SPECULAR, "specular", mapFlag);
-    if (!specularMap.empty())
+    const AssimpMapRef specularMap =
+        TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_SPECULAR, "specular", mapFlag);
+    if (specularMap.Ok())
         parser->Warning("Assimp specular map applied as finish specular from Ks (image map not layered yet): '%s'.",
-                        specularMap.c_str());
+                        specularMap.label.c_str());
     usedImageMap = usedImageMap || mapFlag;
 
     mapFlag = false;
-    std::string bumpPath = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_HEIGHT, "height/bump", mapFlag);
-    if (bumpPath.empty())
-        bumpPath = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_DISPLACEMENT, "displacement", mapFlag);
-    if (!bumpPath.empty())
-        AttachAssimpBumpMap(parser, tex, bumpPath, 0.35);
+    AssimpMapRef bump =
+        TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_HEIGHT, "height/bump", mapFlag);
+    if (!bump.Ok())
+        bump = TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_DISPLACEMENT, "displacement", mapFlag);
+    if (bump.Ok())
+        AttachAssimpBumpMap(parser, tex, bump, 0.35);
     usedImageMap = usedImageMap || mapFlag;
 
     mapFlag = false;
-    const std::string normalPath = TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_NORMALS, "normals", mapFlag);
-    if (normalPath.empty())
-        TryGetAssimpTexture(parser, mat, modelDir, aiTextureType_NORMAL_CAMERA, "normals_camera", mapFlag);
-    if (!normalPath.empty() && tex->Tnormal == nullptr)
+    AssimpMapRef normal =
+        TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_NORMALS, "normals", mapFlag);
+    if (!normal.Ok())
+        normal = TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_NORMAL_CAMERA, "normals_camera", mapFlag);
+    if (normal.Ok() && tex->Tnormal == nullptr)
     {
         // Approximate normal maps via bump_map (true tangent-space normals not wired yet).
-        AttachAssimpBumpMap(parser, tex, normalPath, 0.25);
-        parser->Warning("Assimp normal map approximated as bump_map: '%s'.", normalPath.c_str());
+        AttachAssimpBumpMap(parser, tex, normal, 0.25);
+        parser->Warning("Assimp normal map approximated as bump_map: '%s'.", normal.label.c_str());
     }
-    else if (!normalPath.empty())
-        parser->Warning("Assimp normal map '%s' noted (height/bump already attached).", normalPath.c_str());
+    else if (normal.Ok())
+        parser->Warning("Assimp normal map '%s' noted (height/bump already attached).", normal.label.c_str());
     usedImageMap = usedImageMap || mapFlag;
 
     Post_Textures(tex);
@@ -762,7 +911,7 @@ void BuildMeshFromAssimp(Parser *parser, Mesh *outMesh, const aiScene *scene, co
     for (unsigned mi = 0; mi < scene->mNumMaterials; ++mi)
     {
         bool img = false;
-        textures.push_back(MakeTextureFromAssimpMaterial(parser, scene->mMaterials[mi], modelDir, img));
+        textures.push_back(MakeTextureFromAssimpMaterial(parser, scene, scene->mMaterials[mi], modelDir, img));
         usedImageMap = usedImageMap || img;
     }
 
