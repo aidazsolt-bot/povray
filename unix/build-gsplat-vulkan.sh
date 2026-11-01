@@ -30,7 +30,8 @@ for src in \
   core/render/tracepixel.cpp \
   parser/reservedwords.cpp \
   parser/parser_assimp.cpp \
-  backend/povray.cpp
+  backend/povray.cpp \
+  backend/support/task.cpp
 do
   g++ "${COMMON[@]}" -c -o "${src%.cpp}.o" "$src"
   ar cru libpovray.a "${src%.cpp}.o"
@@ -45,6 +46,7 @@ g++ -pipe -O2 -fno-fast-math -pthread -L/usr/lib64 -o povray \
   ../platform/libx86avx.a ../platform/libx86avxfma4.a ../platform/libx86avx2fma3.a \
   -L"$ASSIMP/build-host/bin" -lassimp -Wl,-rpath,"$ASSIMP/build-host/bin" \
   /usr/lib64/libvulkan.so.1 -lSDL -lXpm -lX11 -ltiff -ljpeg -lpng -lz -lrt -lm -pthread
+cp -f povray povray-dbg-gsplat
 
 echo "Built $ROOT/unix/povray (Vulkan gsplat enabled)"
 echo "Scene token: backend vulkan   (falls back to CPU if device init fails)"
