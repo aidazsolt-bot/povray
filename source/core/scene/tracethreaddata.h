@@ -50,6 +50,7 @@
 // POV-Ray header files (base module)
 #include "base/types.h"
 #include "base/colour.h"
+#include "base/messenger_fwd.h"
 
 // POV-Ray header files (core module)
 #include "core/coretypes.h"
@@ -88,6 +89,10 @@ class TraceThreadData : public ThreadData
 
         /// Destructor.
         virtual ~TraceThreadData() override;
+
+        /// POV-Ray message channel for this thread. Not owned.
+        void SetMessenger(GenericMessenger* messenger) { mpMessenger = messenger; }
+        GenericMessenger* GetMessenger() const { return mpMessenger; }
 
         /// Get the statistics.
         /// @return     Reference to statistic counters.
@@ -218,6 +223,9 @@ class TraceThreadData : public ThreadData
 
         /// current tile index (for crackle cache expiry)
         size_t progress_index;
+
+        /// Not owned. Set by the task that created this thread data.
+        GenericMessenger* mpMessenger;
 };
 
 /// @}

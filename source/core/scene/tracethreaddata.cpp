@@ -65,7 +65,8 @@ TraceThreadData::TraceThreadData(std::shared_ptr<SceneData> sd, size_t seed) :
     stochasticRandomGenerator(GetRandomDoubleGenerator(0.0,1.0)),
     stochasticRandomSeedBase(seed),
     mpCrackleCache(new CrackleCache),
-    mpRenderStats(new RenderStatistics)
+    mpRenderStats(new RenderStatistics),
+    mpMessenger(nullptr)
 {
     for(int i = 0; i < 4; i++)
         Fractal_IStack[i] = nullptr;

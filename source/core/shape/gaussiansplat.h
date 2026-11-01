@@ -240,7 +240,7 @@ class GaussianSplatCloud final : public NonsolidObject
 
         /// Prepare once per camera/size, before tracing pixels. Invalid snapshots
         /// retain failed attempts so render threads use CPU without retrying per pixel.
-        std::shared_ptr<const GaussianSplatVkFramebuffer> PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam) const;
+        std::shared_ptr<const GaussianSplatVkFramebuffer> PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam, GenericMessenger* messenger) const;
 
         /// Binary opacity-voxel occupancy (SuperSplat collision defaults) + marching
         /// cubes. Triangle pigments/normals are computed here via EvalColour (not Assimp).

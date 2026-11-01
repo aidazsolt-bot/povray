@@ -74,7 +74,8 @@ struct GaussianSplatVkFramebuffer
 bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
                                 const GaussianSplatCamBasis& cam,
                                 const std::vector<GaussianSplatGpuSplat>& splats,
-                                GaussianSplatVkFramebuffer& out);
+                                GaussianSplatVkFramebuffer& out,
+                                GenericMessenger* messenger);
 
 /// Sample framebuffer at POV screenU/screenV (pixels from centre). false = miss.
 bool GaussianSplatVkSamplePixel(const GaussianSplatVkFramebuffer& fb,

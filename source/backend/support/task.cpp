@@ -57,6 +57,7 @@
 // POV-Ray header files (backend module)
 #include "backend/control/messagefactory.h"
 #include "backend/scene/backendscenedata.h"
+#include "core/scene/tracethreaddata.h"
 
 // this must be the last file included
 #include "base/povdebug.h"
@@ -298,7 +299,11 @@ void Task::Cleanup ()
 SceneTask::SceneTask(ThreadData *td, const boost::function1<void, Exception&>& f, const char* sn, std::shared_ptr<BackendSceneData> sd, RenderBackend::ViewId vid) :
     Task(td, f),
     mpMessageFactory(new MessageFactory(sd->warningLevel, sn, sd->backendAddress, sd->frontendAddress, sd->sceneId, vid))
-{}
+{
+    TraceThreadData* traceData = dynamic_cast<TraceThreadData*>(td);
+    if (traceData != nullptr)
+        traceData->SetMessenger(mpMessageFactory);
+}
 
 SceneTask::~SceneTask()
 {

@@ -32,6 +32,7 @@
 #include "core/render/ray.h"
 #include "core/scene/tracethreaddata.h"
 
+#include "base/messenger.h"
 #include "base/povdebug.h"
 
 namespace pov
@@ -1029,7 +1030,13 @@ bool GaussianSplatCloud::IntegrateAlongRay(const Vector3d& origin, const Vector3
     return true;
 }
 
-std::shared_ptr<const GaussianSplatVkFramebuffer> GaussianSplatCloud::PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam) const
+static void SplatLog(GenericMessenger* messenger, const char* text)
+{
+    if (messenger != nullptr)
+        messenger->Info("%s", text);
+}
+
+std::shared_ptr<const GaussianSplatVkFramebuffer> GaussianSplatCloud::PrepareVulkanFramebuffer(const GaussianSplatCamBasis& cam, GenericMessenger* messenger) const
 {
     if (!cam.camValid || renderBackend != GaussianSplatRenderBackend::Vulkan)
         return nullptr;
@@ -1066,7 +1073,7 @@ std::shared_ptr<const GaussianSplatVkFramebuffer> GaussianSplatCloud::PrepareVul
     frame->fy = cam.fy;
     if (!GaussianSplatVkAvailable())
     {
-        std::fprintf(stderr, "gaussian_splat vulkan: initialization unavailable; using CPU projection for this camera\n");
+        SplatLog(messenger, "gaussian_splat vulkan: initialization unavailable; using CPU projection for this camera");
         vkFrame = frame;
         return vkFrame;
     }
@@ -1148,8 +1155,8 @@ std::shared_ptr<const GaussianSplatVkFramebuffer> GaussianSplatCloud::PrepareVul
         frame->depth.assign(pixels, 0.0f);
         frame->valid = true;
     }
-    else if (!GaussianSplatVkRenderFrame(*this, cam, gpuSplats, *frame))
-        std::fprintf(stderr, "gaussian_splat vulkan: frame dispatch failed; using CPU projection for this camera\n");
+    else if (!GaussianSplatVkRenderFrame(*this, cam, gpuSplats, *frame, messenger))
+        SplatLog(messenger, "gaussian_splat vulkan: frame dispatch failed; using CPU projection for this camera");
     vkFrame = frame;
     return vkFrame;
 }
@@ -1550,7 +1557,7 @@ bool GaussianSplatCloud::All_Intersections(const Ray& ray, IStack& Depth_Stack, 
         {
             // Shared immutable snapshot under vkFrameMutex (no per-thread map).
             const std::shared_ptr<const GaussianSplatVkFramebuffer> snap =
-                PrepareVulkanFramebuffer(cam);
+                PrepareVulkanFramebuffer(cam, Thread->GetMessenger());
             if (snap != nullptr && snap->valid)
             {
                 gotSeg = GaussianSplatVkSamplePixel(*snap, cam.screenU, cam.screenV, seg);

@@ -9,6 +9,8 @@
 
 #include "core/shape/gaussiansplat_vk.h"
 
+#include "base/messenger.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -25,6 +27,12 @@ namespace pov
 namespace
 {
 thread_local GaussianSplatVkTiming gLastTiming;
+
+void LogVk(GenericMessenger* messenger, const char* text)
+{
+    if (messenger != nullptr)
+        messenger->Info("%s", text);
+}
 } // namespace
 
 #ifndef POV_HAVE_VULKAN
@@ -42,7 +50,8 @@ const GaussianSplatVkTiming& GaussianSplatVkLastTiming()
 bool GaussianSplatVkRenderFrame(const GaussianSplatCloud&,
                                 const GaussianSplatCamBasis&,
                                 const std::vector<GaussianSplatGpuSplat>&,
-                                GaussianSplatVkFramebuffer& out)
+                                GaussianSplatVkFramebuffer& out,
+                                GenericMessenger*)
 {
     out.valid = false;
     return false;
@@ -291,11 +300,29 @@ void WriteDescBuffer(VkDevice dev, VkDescriptorSet set, uint32_t binding,
     vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
 }
 
-bool InitDevice()
+void LogDeviceInit(GenericMessenger* messenger)
+{
+    if (!gDev.ok || gDev.loggedInit || messenger == nullptr)
+        return;
+    char logbuf[512];
+    std::snprintf(logbuf, sizeof(logbuf),
+        "gaussian_splat vulkan: libvulkan loaded, device='%s' type=%s "
+        "timestamps=%s period=%.3fns",
+        gDev.deviceName, gDev.deviceType,
+        (gDev.queryPool != VK_NULL_HANDLE) ? "yes" : "no",
+        static_cast<double>(gDev.timestampPeriodNs));
+    LogVk(messenger, logbuf);
+    gDev.loggedInit = true;
+}
+
+bool InitDevice(GenericMessenger* messenger)
 {
     std::lock_guard<std::mutex> lock(gDevMutex);
     if (gDev.ok)
+    {
+        LogDeviceInit(messenger);
         return true;
+    }
     if (volkInitialize() != VK_SUCCESS)
         return false;
 
@@ -458,17 +485,7 @@ bool InitDevice()
     }
 
     gDev.ok = true;
-    if (!gDev.loggedInit)
-    {
-        std::fprintf(stderr,
-            "gaussian_splat vulkan: libvulkan loaded, device='%s' type=%s "
-            "timestamps=%s period=%.3fns\n",
-            gDev.deviceName, gDev.deviceType,
-            (gDev.queryPool != VK_NULL_HANDLE) ? "yes" : "no",
-            static_cast<double>(gDev.timestampPeriodNs));
-        std::fflush(stderr);
-        gDev.loggedInit = true;
-    }
+    LogDeviceInit(messenger);
     return true;
 }
 
@@ -523,7 +540,7 @@ struct BlendUBO
 
 bool GaussianSplatVkAvailable()
 {
-    return InitDevice();
+    return InitDevice(nullptr);
 }
 
 const GaussianSplatVkTiming& GaussianSplatVkLastTiming()
@@ -569,13 +586,14 @@ bool GaussianSplatVkSamplePixel(const GaussianSplatVkFramebuffer& fb,
 bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
                                 const GaussianSplatCamBasis& cam,
                                 const std::vector<GaussianSplatGpuSplat>& splats,
-                                GaussianSplatVkFramebuffer& out)
+                                GaussianSplatVkFramebuffer& out,
+                                GenericMessenger* messenger)
 {
     out.valid = false;
     gLastTiming = GaussianSplatVkTiming();
     if (splats.empty() || !cam.camValid)
         return false;
-    if (!InitDevice())
+    if (!InitDevice(messenger))
         return false;
 
     std::lock_guard<std::mutex> lock(gSubmitMutex);
@@ -899,21 +917,22 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     std::snprintf(gLastTiming.deviceName, sizeof(gLastTiming.deviceName), "%s", d.deviceName);
     std::snprintf(gLastTiming.deviceType, sizeof(gLastTiming.deviceType), "%s", d.deviceType);
 
+    char logbuf[512];
     if (tsOk)
     {
-        std::fprintf(stderr,
+        std::snprintf(logbuf, sizeof(logbuf),
             "gaussian_splat vulkan frame: %dx%d splats=%u host_gpu=%.2fms gpu_ts=%.2fms "
-            "device='%s' (%s)\n",
+            "device='%s' (%s)",
             imgW, imgH, n, hostMs, gpuTsMs, d.deviceName, d.deviceType);
     }
     else
     {
-        std::fprintf(stderr,
+        std::snprintf(logbuf, sizeof(logbuf),
             "gaussian_splat vulkan frame: %dx%d splats=%u host_gpu=%.2fms gpu_ts=n/a "
-            "device='%s' (%s)\n",
+            "device='%s' (%s)",
             imgW, imgH, n, hostMs, d.deviceName, d.deviceType);
     }
-    std::fflush(stderr);
+    LogVk(messenger, logbuf);
 
     vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
     cleanup();
