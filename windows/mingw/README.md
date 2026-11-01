@@ -38,10 +38,12 @@ Output (default `MINGW_OUT=./build-mingw`):
 - Console: `$MINGW_OUT/povray.exe`
 - GUI: `$MINGW_OUT/pvengine64.exe` (objs in `obj-console/` vs `obj-gui/`)
 - Logs: `$MINGW_OUT/build-console.log` / `build-gui.log`
+- This feature branch also copies Assimp runtime DLLs next to the exe:
+  `libassimp-6.dll`, `libwebpdecoder.dll` (SOG/WebP), `zlib1.dll`,
+  `libwinpthread-1.dll`
 
-The link step uses `-static-libgcc -static-libstdc++` and a static
-`libwinpthread`, so a normal Windows 64-bit machine does **not** need
-MinGW DLLs next to the exe. Copy only the `.exe`.
+The exe itself is linked with `-static-libgcc -static-libstdc++` and static
+`libwinpthread`. Ship the Assimp/WebP DLLs beside it for Gaussian-splat imports.
 
 `BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
 
@@ -55,6 +57,7 @@ MinGW DLLs next to the exe. Copy only the `.exe`.
 | AVX / AVX2 / FMA optimized noise | Yes (runtime CPUID dispatch; TUs built with `-mavx` / `-mavx2 -mfma` / `-mfma4`) |
 | OpenEXR (`.exr`) | **No** (`OPENEXR_MISSING`) – IlmImf/Half/Iex chain not wired yet |
 | POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
+| Assimp / Gaussian-splat / Vulkan (volk) | Yes (this feature branch) |
 
 TIFF note: `USE_WIN32_FILEIO` is set **only** when compiling `libraries/tiff/*.c`.
 POV-Ray's `source/base/image/tiff.cpp` uses `TIFFClientOpen` with `void*` client
