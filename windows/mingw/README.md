@@ -38,13 +38,10 @@ Output (default `MINGW_OUT=./build-mingw`):
 - Console: `$MINGW_OUT/povray.exe`
 - GUI: `$MINGW_OUT/pvengine64.exe` (objs in `obj-console/` vs `obj-gui/`)
 - Logs: `$MINGW_OUT/build-console.log` / `build-gui.log`
-- If Gaussian-splat sources are present (other feature branches), also copies
-  Assimp runtime DLLs: `libassimp-6.dll`, `libwebpdecoder.dll`, `zlib1.dll`,
-  `libwinpthread-1.dll`
 
 The link step uses `-static-libgcc -static-libstdc++` and a static
-`libwinpthread` for the exe itself. Stock builds can ship just the `.exe`;
-gsplat/Assimp builds need the Assimp/WebP DLLs beside it.
+`libwinpthread`, so a normal Windows 64-bit machine does **not** need
+MinGW DLLs next to the exe. Copy only the `.exe`.
 
 `BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
 
@@ -57,12 +54,11 @@ gsplat/Assimp builds need the Assimp/WebP DLLs beside it.
 | TIFF | Yes (`tif_config.h.vc` / `tiffconf.h.vc` + `tif_win32.c`; also links `tif_extension.c`) |
 | AVX / AVX2 / FMA optimized noise | Yes (runtime CPUID dispatch; TUs built with `-mavx` / `-mavx2 -mfma` / `-mfma4`) |
 | OpenEXR (`.exr`) | **No** (`OPENEXR_MISSING`) – IlmImf/Half/Iex chain not wired yet |
+| POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
 
 TIFF note: `USE_WIN32_FILEIO` is set **only** when compiling `libraries/tiff/*.c`.
 POV-Ray's `source/base/image/tiff.cpp` uses `TIFFClientOpen` with `void*` client
 handles and is built with `AVOID_WIN32_FILEIO` instead.
-| POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
-| Assimp / Gaussian-splat / Vulkan (volk) | Auto-enabled when `gaussiansplat.cpp` exists |
 
 ## Config headers
 
@@ -73,7 +69,7 @@ Compiler detection lives in:
 
 ## Notes
 
-- This is an **experimental** console path for MinGW-w64, complementary to the
-  official Visual Studio build described in `windows/README.md`.
+- This is an **experimental** MinGW-w64 path, complementary to the official
+  Visual Studio build described in `windows/README.md`.
 - Cygwin/`unix/configure --without-cygwin-dll` is a separate (still BETA) path;
   it uses `unix/povconfig`, not these Windows MinGW headers.

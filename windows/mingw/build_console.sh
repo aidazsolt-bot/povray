@@ -94,21 +94,6 @@ done
 # symbols referenced by tif_print.c (needed for a complete static MinGW link).
 FILTERED+=("$ROOT/libraries/tiff/libtiff/tif_extension.c")
 
-# Optional: Gaussian splat + Assimp + Vulkan (feature branches only).
-ASSIMP_ROOT="${ASSIMP_ROOT:-/usr/src/TestAdnroidNDKSDK/Assimp-Arris.Git.2026}"
-ASSIMP_MINGW="${ASSIMP_MINGW:-$ASSIMP_ROOT/build-mingw}"
-VK_HEADERS="${VK_HEADERS:-/usr/src/TestAdnroidNDKSDK/RenderAssimp2026/desktop/deps/vulkan-headers}"
-ENABLE_GSPLAT=0
-if [[ -f "$ROOT/source/core/shape/gaussiansplat.cpp" ]]; then
-  ENABLE_GSPLAT=1
-  FILTERED+=(
-    "$ROOT/source/core/shape/gaussiansplat.cpp"
-    "$ROOT/source/core/shape/gaussiansplat_surface.cpp"
-    "$ROOT/source/core/shape/gaussiansplat_vk.cpp"
-    "$ROOT/source/parser/parser_assimp.cpp"
-  )
-fi
-
 # libpng expects pnglibconf.h (VS generates it; use upstream prebuilt).
 # libtiff expects tif_config.h / tiffconf.h (VS uses the .vc templates).
 mkdir -p "$OUT/include"
@@ -136,11 +121,6 @@ INCLUDES=(
   -I"$ROOT/libraries/tiff/libtiff"
 )
 
-BUILT_BY_MSG='MinGW-w64 cross (povray.git)'
-if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
-  BUILT_BY_MSG='MinGW-w64 cross (povray.git + vulkan gsplat)'
-fi
-
 DEFS=(
   -DNDEBUG
   -DWIN32
@@ -156,23 +136,8 @@ DEFS=(
   # POV-Ray's tiff.cpp uses TIFFClientOpen with void* client handles.
   # USE_WIN32_FILEIO is applied only to libraries/tiff/*.c below.
   -DAVOID_WIN32_FILEIO
-  -DBUILT_BY="\"${BUILT_BY_MSG}\""
+  -DBUILT_BY='"MinGW-w64 cross (povray.git)"'
 )
-
-if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
-  INCLUDES+=(
-    -I"$ROOT/libraries/volk"
-    -I"$VK_HEADERS/include"
-    -I"$ASSIMP_ROOT/include"
-    -I"$ASSIMP_MINGW/include"
-  )
-  DEFS+=(
-    -DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1
-    -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
-    -DPOV_HAVE_VULKAN
-    -DVK_NO_PROTOTYPES
-  )
-fi
 
 if [[ "$FRONTEND" == "console" ]]; then
   DEFS+=(-D_CONSOLE)
@@ -300,14 +265,11 @@ mapfile -t OBJS < <(find "$OBJ" -name '*.o' | sort)
 
 echo "Linking ${#OBJS[@]} objects -> $OUT/$EXE_NAME" | tee -a "$LOG"
 # Static libgcc/libstdc++/winpthread so the .exe runs on plain Windows without
-# shipping MinGW runtime DLLs. Assimp: dynamic DLL. Vulkan: volk -> vulkan-1.dll.
+# shipping MinGW runtime DLLs.
 LINK_COMMON=(-O2 -pthread -static-libgcc -static-libstdc++
   -Wl,-Bstatic -Wl,--whole-archive -lwinpthread -Wl,--no-whole-archive
   -Wl,-Bdynamic -lws2_32)
 LINK_LIBS=()
-if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
-  LINK_LIBS+=(-L"$ASSIMP_MINGW/lib" -lassimp)
-fi
 
 if [[ "$FRONTEND" == "gui" ]]; then
   # MinGW CRT enters via WinMain; do not use MSVC's POVWINStartup entry
@@ -324,44 +286,6 @@ fi
   "$CXX" "${LINK_COMMON[@]}" -o "$OUT/$EXE_NAME" "${OBJS[@]}" "${LINK_LIBS[@]}" 2>>"$LOG"
 }
 
-# Runtime DLLs for Assimp when gsplat/Assimp path is enabled.
-# libassimp-6.dll imports libwebpdecoder.dll (SOG/WebP), zlib1.dll, libwinpthread-1.dll.
-# Vulkan loader stays system-provided as vulkan-1.dll.
-MINGW_SYSROOT_BIN="/usr/x86_64-w64-mingw32/sys-root/mingw/bin"
-copy_runtime_dll() {
-  local name="$1"
-  shift
-  local src
-  for src in "$@"; do
-    if [[ -f "$src" ]]; then
-      cp -f "$src" "$OUT/$name"
-      echo "Runtime DLL: $OUT/$name  (from $src)" | tee -a "$LOG"
-      return 0
-    fi
-  done
-  echo "WARN: missing runtime DLL $name (searched: $*)" | tee -a "$LOG"
-  return 1
-}
-if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
-  copy_runtime_dll libassimp-6.dll "$ASSIMP_MINGW/bin/libassimp-6.dll" || true
-  copy_runtime_dll libwebpdecoder.dll \
-    "$ASSIMP_MINGW/bin/libwebpdecoder.dll" \
-    "$ASSIMP_MINGW/assimp_webp/libwebpdecoder.dll" \
-    "$ASSIMP_MINGW/assimp_webp/Release/libwebpdecoder.dll" || true
-  copy_runtime_dll zlib1.dll \
-    "$ASSIMP_MINGW/bin/zlib1.dll" \
-    "$MINGW_SYSROOT_BIN/zlib1.dll" || true
-  copy_runtime_dll libwinpthread-1.dll \
-    "$ASSIMP_MINGW/bin/libwinpthread-1.dll" \
-    "$MINGW_SYSROOT_BIN/libwinpthread-1.dll" || true
-fi
-
 file "$OUT/$EXE_NAME" | tee -a "$LOG"
 ls -lh "$OUT/$EXE_NAME" 2>/dev/null | tee -a "$LOG"
-if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
-  ls -lh "$OUT"/libassimp-6.dll "$OUT"/libwebpdecoder.dll \
-    "$OUT"/zlib1.dll "$OUT"/libwinpthread-1.dll 2>/dev/null | tee -a "$LOG" || true
-  echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND, gsplat/Assimp/Vulkan enabled)"
-else
-  echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND)"
-fi
+echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND)"
