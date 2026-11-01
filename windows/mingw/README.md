@@ -1,12 +1,12 @@
-# MinGW-w64 Windows console build
+# MinGW-w64 Windows build (console + GUI)
 
-Cross-build (or native MinGW-w64) of the **Windows console** POV-Ray front-end
-(`vfe/win/console`), without the POVWIN GUI.
+Cross-build (or native MinGW-w64) of the Windows POV-Ray front-ends:
+console (`vfe/win/console`) and optional POVWIN GUI (`windows/pv*.cpp`).
 
 ## Requirements
 
-- `x86_64-w64-mingw32-g++` / `gcc` (MinGW-w64 toolchain)
-- Bash, `rg`, `realpath`, `md5sum`
+- `x86_64-w64-mingw32-g++` / `gcc` / `windres` (MinGW-w64 toolchain)
+- Bash, `rg`, `realpath`, `md5sum`, `python3`
 - Optional: Wine, to run the resulting `.exe` on Linux
 
 On Fedora/RHEL-style hosts:
@@ -20,23 +20,31 @@ dnf install mingw64-gcc-c++
 From the repository root:
 
 ```bash
+# Console (default) -> ./build-mingw/povray.exe
 ./windows/mingw/build_console.sh
+
+# POVWIN GUI -> ./build-mingw/pvengine64.exe
+MINGW_FRONTEND=gui ./windows/mingw/build_console.sh
 ```
 
 Override output directory or toolchain if needed:
 
 ```bash
-MINGW_OUT=$HOME/tmp/mingw_pov/out CXX=x86_64-w64-mingw32-g++ ./windows/mingw/build_console.sh
+MINGW_OUT=$HOME/tmp/mingw_pov CXX=x86_64-w64-mingw32-g++ ./windows/mingw/build_console.sh
 ```
 
-Output:
+Output (default `MINGW_OUT=./build-mingw`):
 
-- `$MINGW_OUT/povray.exe` (default: `windows/mingw/out/povray.exe`)
-- Build log: `$MINGW_OUT/build.log`
+- Console: `$MINGW_OUT/povray.exe`
+- GUI: `$MINGW_OUT/pvengine64.exe` (objs in `obj-console/` vs `obj-gui/`)
+- Logs: `$MINGW_OUT/build-console.log` / `build-gui.log`
+- If Gaussian-splat sources are present (other feature branches), also copies
+  Assimp runtime DLLs: `libassimp-6.dll`, `libwebpdecoder.dll`, `zlib1.dll`,
+  `libwinpthread-1.dll`
 
 The link step uses `-static-libgcc -static-libstdc++` and a static
-`libwinpthread`, so a normal Windows 64-bit machine does **not** need
-MinGW DLLs next to the exe. Copy only `povray.exe`.
+`libwinpthread` for the exe itself. Stock builds can ship just the `.exe`;
+gsplat/Assimp builds need the Assimp/WebP DLLs beside it.
 
 `BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
 
@@ -53,8 +61,8 @@ MinGW DLLs next to the exe. Copy only `povray.exe`.
 TIFF note: `USE_WIN32_FILEIO` is set **only** when compiling `libraries/tiff/*.c`.
 POV-Ray's `source/base/image/tiff.cpp` uses `TIFFClientOpen` with `void*` client
 handles and is built with `AVOID_WIN32_FILEIO` instead.
-| POVWIN GUI / custom `POVWINStartup` entry | **No** – console only |
-| Assimp / Gaussian-splat experimental parsers | **No** on this branch base (upstream `master`); add when merging those feature branches |
+| POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
+| Assimp / Gaussian-splat / Vulkan (volk) | Auto-enabled when `gaussiansplat.cpp` exists |
 
 ## Config headers
 

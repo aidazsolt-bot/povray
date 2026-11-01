@@ -262,3 +262,6 @@ $RECYCLE.BIN/
 
 # Used specifically by our own workflows
 /artifact*
+
+# MinGW cross-build output
+/build-mingw/

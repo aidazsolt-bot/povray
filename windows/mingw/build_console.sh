@@ -1,49 +1,86 @@
 #!/bin/bash
-# MinGW-w64 cross-build of the Windows console POV-Ray front-end.
-# Run from repo root or any cwd. Output: windows/mingw/out/povray.exe
+# MinGW-w64 cross-build of Windows POV-Ray.
+# Frontend: MINGW_FRONTEND=console (default) or gui.
+# Run from repo root or any cwd.
+# console -> $MINGW_OUT/povray.exe
+# gui     -> $MINGW_OUT/pvengine64.exe
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="${MINGW_OUT:-$ROOT/windows/mingw/out}"
-OBJ="$OUT/obj"
-LOG="$OUT/build.log"
+FRONTEND="${MINGW_FRONTEND:-console}"
+OUT="${MINGW_OUT:-$ROOT/build-mingw}"
+# Separate object trees so console (_CONSOLE) and gui can share $OUT.
+OBJ="$OUT/obj-$FRONTEND"
+LOG="$OUT/build-$FRONTEND.log"
 CXX="${CXX:-x86_64-w64-mingw32-g++}"
 CC="${CC:-x86_64-w64-mingw32-gcc}"
+WINDRES="${WINDRES:-x86_64-w64-mingw32-windres}"
 JOBS="${JOBS:-$(nproc)}"
+# Prefer vs2022 source lists; fall back to vs2015.
+VSDIR="$ROOT/windows/vs2022"
+[[ -d "$VSDIR" ]] || VSDIR="$ROOT/windows/vs2015"
+
+case "$FRONTEND" in
+  console|gui) ;;
+  *)
+    echo "MINGW_FRONTEND must be console or gui (got: $FRONTEND)" >&2
+    exit 1
+    ;;
+esac
 
 mkdir -p "$OBJ"
 : > "$LOG"
 
-PROJECTS=(
-  console
-  vfewin
-  povbase
-  povcore
-  povbackend
-  povfrontend
-  povparser
-  povms
-  povvm
-  povplatform
-  zlib
-  libpng
-  jpeg
-  tiff
-)
+if [[ "$FRONTEND" == "gui" ]]; then
+  PROJECTS=(
+    povray
+    rtrsupport
+    vfewin
+    povbase
+    povcore
+    povbackend
+    povfrontend
+    povparser
+    povms
+    povvm
+    povplatform
+    zlib
+    libpng
+    jpeg
+    tiff
+  )
+  EXE_NAME="pvengine64.exe"
+else
+  PROJECTS=(
+    console
+    vfewin
+    povbase
+    povcore
+    povbackend
+    povfrontend
+    povparser
+    povms
+    povvm
+    povplatform
+    zlib
+    libpng
+    jpeg
+    tiff
+  )
+  EXE_NAME="povray.exe"
+fi
 
-# Collect ClCompile Include= paths from VS projects (relative to windows/vs2015).
+# Collect ClCompile Include= paths from VS projects (relative to windows/vs*).
 mapfile -t REL_SRCS < <(
   for p in "${PROJECTS[@]}"; do
-    rg -oN 'ClCompile Include="([^"]+)"' -r '$1' "$ROOT/windows/vs2015/$p.vcxproj" || true
+    rg -oN 'ClCompile Include="([^"]+)"' -r '$1' "$VSDIR/$p.vcxproj" || true
   done | sed 's|\\|/|g' | while read -r rel; do
-    # Resolve relative to windows/vs2015
-    realpath -m "$ROOT/windows/vs2015/$rel"
+    realpath -m "$VSDIR/$rel"
   done | awk '!seen[$0]++'
 )
 
 # Skip OpenEXR for now (multi-lib IlmImf/Half/Iex chain not wired yet).
 # Skip povms.c: VS excludes it; povms.cpp pulls it in as C++.
-# AVX noise TUs are kept; per-file -mavx/-mavx2/-mfma flags are applied below.
 FILTERED=()
 for s in "${REL_SRCS[@]}"; do
   case "$s" in
@@ -57,17 +94,20 @@ done
 # symbols referenced by tif_print.c (needed for a complete static MinGW link).
 FILTERED+=("$ROOT/libraries/tiff/libtiff/tif_extension.c")
 
-# Gaussian splat + Assimp import + Vulkan compute (not yet in vs2015 vcxproj lists).
-FILTERED+=(
-  "$ROOT/source/core/shape/gaussiansplat.cpp"
-  "$ROOT/source/core/shape/gaussiansplat_surface.cpp"
-  "$ROOT/source/core/shape/gaussiansplat_vk.cpp"
-  "$ROOT/source/parser/parser_assimp.cpp"
-)
-
+# Optional: Gaussian splat + Assimp + Vulkan (feature branches only).
 ASSIMP_ROOT="${ASSIMP_ROOT:-/usr/src/TestAdnroidNDKSDK/Assimp-Arris.Git.2026}"
 ASSIMP_MINGW="${ASSIMP_MINGW:-$ASSIMP_ROOT/build-mingw}"
 VK_HEADERS="${VK_HEADERS:-/usr/src/TestAdnroidNDKSDK/RenderAssimp2026/desktop/deps/vulkan-headers}"
+ENABLE_GSPLAT=0
+if [[ -f "$ROOT/source/core/shape/gaussiansplat.cpp" ]]; then
+  ENABLE_GSPLAT=1
+  FILTERED+=(
+    "$ROOT/source/core/shape/gaussiansplat.cpp"
+    "$ROOT/source/core/shape/gaussiansplat_surface.cpp"
+    "$ROOT/source/core/shape/gaussiansplat_vk.cpp"
+    "$ROOT/source/parser/parser_assimp.cpp"
+  )
+fi
 
 # libpng expects pnglibconf.h (VS generates it; use upstream prebuilt).
 # libtiff expects tif_config.h / tiffconf.h (VS uses the .vc templates).
@@ -80,6 +120,7 @@ INCLUDES=(
   -I"$OUT/include"
   -I"$ROOT/windows/povconfig"
   -I"$ROOT/windows"
+  -I"$ROOT/windows/rtrsupport"
   -I"$ROOT/source"
   -I"$ROOT/source/base"
   -I"$ROOT/source/backend"
@@ -93,14 +134,14 @@ INCLUDES=(
   -I"$ROOT/libraries/png"
   -I"$ROOT/libraries/jpeg"
   -I"$ROOT/libraries/tiff/libtiff"
-  -I"$ROOT/libraries/volk"
-  -I"$VK_HEADERS/include"
-  -I"$ASSIMP_ROOT/include"
-  -I"$ASSIMP_MINGW/include"
 )
 
+BUILT_BY_MSG='MinGW-w64 cross (povray.git)'
+if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
+  BUILT_BY_MSG='MinGW-w64 cross (povray.git + vulkan gsplat)'
+fi
+
 DEFS=(
-  -D_CONSOLE
   -DNDEBUG
   -DWIN32
   -D_WINDOWS
@@ -115,53 +156,54 @@ DEFS=(
   # POV-Ray's tiff.cpp uses TIFFClientOpen with void* client handles.
   # USE_WIN32_FILEIO is applied only to libraries/tiff/*.c below.
   -DAVOID_WIN32_FILEIO
-  -DBUILT_BY='"MinGW-w64 cross (povray.git + vulkan gsplat)"'
-  -DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1
-  -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
-  -DPOV_HAVE_VULKAN
-  -DVK_NO_PROTOTYPES
+  -DBUILT_BY="\"${BUILT_BY_MSG}\""
 )
 
+if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
+  INCLUDES+=(
+    -I"$ROOT/libraries/volk"
+    -I"$VK_HEADERS/include"
+    -I"$ASSIMP_ROOT/include"
+    -I"$ASSIMP_MINGW/include"
+  )
+  DEFS+=(
+    -DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1
+    -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
+    -DPOV_HAVE_VULKAN
+    -DVK_NO_PROTOTYPES
+  )
+fi
+
+if [[ "$FRONTEND" == "console" ]]; then
+  DEFS+=(-D_CONSOLE)
+else
+  DEFS+=(
+    -DCOMMONCTRL_VERSION=0x500
+    -DCLASSLIB_DEFS_H
+    -DISOLATION_AWARE_ENABLED
+  )
+fi
+
 CXXFLAGS=(-std=c++17 -O2 -ffast-math -pthread "${DEFS[@]}" "${INCLUDES[@]}")
+# GUI sources use MSVC-tolerant initializers (e.g. -1 into WORD/unsigned).
+if [[ "$FRONTEND" == "gui" ]]; then
+  CXXFLAGS+=(-Wno-narrowing)
+fi
 # tif_dirinfo.c: MSVC-oriented lfind/_lfind callback prototype mismatch under GCC.
 CFLAGS=(-O2 -Wno-incompatible-pointer-types "${DEFS[@]}" "${INCLUDES[@]}")
 
-echo "Sources: ${#FILTERED[@]}  CXX=$CXX  OUT=$OUT" | tee -a "$LOG"
+echo "Frontend=$FRONTEND  Sources: ${#FILTERED[@]}  CXX=$CXX  OUT=$OUT/$EXE_NAME" | tee -a "$LOG"
 
-compile_one() {
-  local src="$1"
-  local base hash obj
-  base="$(basename "$src")"
-  hash="$(printf '%s' "$src" | md5sum | awk '{print $1}')"
-  case "$src" in
-    *.c)
-      obj="$OBJ/${base%.c}.$hash.o"
-      if [[ -f "$obj" && "$obj" -nt "$src" ]]; then return 0; fi
-      echo "CC  $src" >>"$LOG"
-      "$CC" "${CFLAGS[@]}" -c -o "$obj" "$src" >>"$LOG" 2>&1
-      ;;
-    *)
-      obj="$OBJ/${base%.cpp}.$hash.o"
-      if [[ -f "$obj" && "$obj" -nt "$src" ]]; then return 0; fi
-      echo "CXX $src" >>"$LOG"
-      "$CXX" "${CXXFLAGS[@]}" -c -o "$obj" "$src" >>"$LOG" 2>&1
-      ;;
-  esac
-}
-export -f compile_one
-export CC CXX OBJ LOG
-export CFLAGS CXXFLAGS
-# bash export arrays not portable; rewrite compile via env files
-printf '%s\n' "${CFLAGS[@]}" >"$OUT/cflags.txt"
-printf '%s\n' "${CXXFLAGS[@]}" >"$OUT/cxxflags.txt"
+printf '%s\n' "${CFLAGS[@]}" >"$OBJ/cflags.txt"
+printf '%s\n' "${CXXFLAGS[@]}" >"$OBJ/cxxflags.txt"
 
 compile_one_file() {
   local src="$1"
   local base hash obj
   base="$(basename "$src")"
   hash="$(printf '%s' "$src" | md5sum | awk '{print $1}')"
-  mapfile -t CFLAGS <"$OUT/cflags.txt"
-  mapfile -t CXXFLAGS <"$OUT/cxxflags.txt"
+  mapfile -t CFLAGS <"$OBJ/cflags.txt"
+  mapfile -t CXXFLAGS <"$OBJ/cxxflags.txt"
   case "$src" in
     */povms.c|*/povmsutil.c)
       # POVMS C sources must be compiled as C++ in-tree.
@@ -197,6 +239,10 @@ compile_one_file() {
         */avx2fma3/*) extra=(-mavx2 -mfma) ;;
         */avxfma4/*)  extra=(-mavx -mfma4) ;;
         */avx/*)      extra=(-mavx) ;;
+        */winprecomp.cpp)
+          # VS uses this as PCH creator; MinGW just compiles it as a normal TU.
+          extra=(-Wno-unused)
+          ;;
       esac
       echo "CXX $src ${extra[*]:-}"
       if ! "$CXX" "${CXXFLAGS[@]}" "${extra[@]}" -c -o "$obj" "$src" 2>>"$LOG"; then
@@ -209,34 +255,113 @@ compile_one_file() {
 export -f compile_one_file
 export CC CXX OBJ LOG OUT
 
-printf '%s\n' "${FILTERED[@]}" >"$OUT/sources.txt"
-if ! cat "$OUT/sources.txt" | xargs -P "$JOBS" -I{} bash -c 'compile_one_file "$@"' _ {}; then
+printf '%s\n' "${FILTERED[@]}" >"$OBJ/sources.txt"
+if ! cat "$OBJ/sources.txt" | xargs -P "$JOBS" -I{} bash -c 'compile_one_file "$@"' _ {}; then
   echo "Compile failed; see $LOG" >&2
   rg -n 'error:|FATAL|FAIL ' "$LOG" | tail -40 >&2 || true
   exit 1
 fi
 
+RC_OBJ=""
+if [[ "$FRONTEND" == "gui" ]]; then
+  RC_OBJ="$OBJ/pvengine.rc.o"
+  RC_MINGW="$ROOT/windows/pvengine_mingw.rc"
+  echo "Generate $RC_MINGW (posix path case) + WINDRES" | tee -a "$LOG"
+  python3 - "$ROOT/windows" "$RC_MINGW" <<'PY'
+import re, sys
+from pathlib import Path
+win = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = (win / "pvengine.rc").read_text(errors="replace")
+index = {}
+for p in win.rglob("*"):
+    if p.is_file():
+        rel = p.relative_to(win).as_posix()
+        index[rel.lower()] = rel
+
+def fix_quoted(m):
+    s = m.group(1).replace("\\\\", "/").replace("\\", "/")
+    return '"' + index.get(s.lower(), s) + '"'
+
+dst.write_text(re.sub(r'"([^"\n]*)"', fix_quoted, text))
+PY
+  (
+    cd "$ROOT/windows"
+    "$WINDRES" -I. -Ipovconfig -DNDEBUG -o "$RC_OBJ" "$(basename "$RC_MINGW")"
+  ) 2>>"$LOG" || {
+    echo "windres failed; see $LOG" >&2
+    rg -n 'error:|FATAL|FAIL |undefined|can.t open' "$LOG" | tail -40 >&2 || true
+    exit 1
+  }
+fi
+
+# Collect objects after windres so pvengine.rc.o is included once.
 mapfile -t OBJS < <(find "$OBJ" -name '*.o' | sort)
-echo "Linking ${#OBJS[@]} objects -> $OUT/povray.exe" | tee -a "$LOG"
+
+echo "Linking ${#OBJS[@]} objects -> $OUT/$EXE_NAME" | tee -a "$LOG"
 # Static libgcc/libstdc++/winpthread so the .exe runs on plain Windows without
-# shipping MinGW runtime DLLs (libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-1.dll).
-# --whole-archive is required; plain -Bstatic -lwinpthread still leaves a DLL import.
-# Assimp: dynamic DLL (ship libassimp-6.dll next to exe). Vulkan: volk LoadLibrary vulkan-1.dll.
+# shipping MinGW runtime DLLs. Assimp: dynamic DLL. Vulkan: volk -> vulkan-1.dll.
 LINK_COMMON=(-O2 -pthread -static-libgcc -static-libstdc++
   -Wl,-Bstatic -Wl,--whole-archive -lwinpthread -Wl,--no-whole-archive
   -Wl,-Bdynamic -lws2_32)
-# Assimp must follow object files (GNU ld left-to-right).
-LINK_LIBS=(-L"$ASSIMP_MINGW/lib" -lassimp)
-"$CXX" "${LINK_COMMON[@]}" -o "$OUT/povray.exe" "${OBJS[@]}" "${LINK_LIBS[@]}" -lstdc++fs 2>>"$LOG" || {
-  # retry without libstdc++fs (may be header-only in newer libstdc++)
-  "$CXX" "${LINK_COMMON[@]}" -o "$OUT/povray.exe" "${OBJS[@]}" "${LINK_LIBS[@]}" 2>>"$LOG"
-}
-
-# Runtime DLL for Assimp (Vulkan loader stays system-provided as vulkan-1.dll).
-if [[ -f "$ASSIMP_MINGW/bin/libassimp-6.dll" ]]; then
-  cp -f "$ASSIMP_MINGW/bin/libassimp-6.dll" "$OUT/libassimp-6.dll"
+LINK_LIBS=()
+if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
+  LINK_LIBS+=(-L"$ASSIMP_MINGW/lib" -lassimp)
 fi
 
-file "$OUT/povray.exe" | tee -a "$LOG"
-ls -lh "$OUT/povray.exe" "$OUT/libassimp-6.dll" 2>/dev/null | tee -a "$LOG"
-echo "DONE $OUT/povray.exe (Vulkan via volk -> vulkan-1.dll at runtime)"
+if [[ "$FRONTEND" == "gui" ]]; then
+  # MinGW CRT enters via WinMain; do not use MSVC's POVWINStartup entry
+  # (custom -e made ld segfault on this toolchain).
+  LINK_COMMON+=(-mwindows)
+  LINK_LIBS+=(
+    -lcomctl32 -lgdi32 -luser32 -ladvapi32 -lshell32 -lcomdlg32
+    -lole32 -luuid -lwinmm -lversion -lhtmlhelp -lpsapi -lwininet -ldbghelp
+  )
+fi
+
+"$CXX" "${LINK_COMMON[@]}" -o "$OUT/$EXE_NAME" "${OBJS[@]}" "${LINK_LIBS[@]}" -lstdc++fs 2>>"$LOG" || {
+  # retry without libstdc++fs (may be header-only in newer libstdc++)
+  "$CXX" "${LINK_COMMON[@]}" -o "$OUT/$EXE_NAME" "${OBJS[@]}" "${LINK_LIBS[@]}" 2>>"$LOG"
+}
+
+# Runtime DLLs for Assimp when gsplat/Assimp path is enabled.
+# libassimp-6.dll imports libwebpdecoder.dll (SOG/WebP), zlib1.dll, libwinpthread-1.dll.
+# Vulkan loader stays system-provided as vulkan-1.dll.
+MINGW_SYSROOT_BIN="/usr/x86_64-w64-mingw32/sys-root/mingw/bin"
+copy_runtime_dll() {
+  local name="$1"
+  shift
+  local src
+  for src in "$@"; do
+    if [[ -f "$src" ]]; then
+      cp -f "$src" "$OUT/$name"
+      echo "Runtime DLL: $OUT/$name  (from $src)" | tee -a "$LOG"
+      return 0
+    fi
+  done
+  echo "WARN: missing runtime DLL $name (searched: $*)" | tee -a "$LOG"
+  return 1
+}
+if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
+  copy_runtime_dll libassimp-6.dll "$ASSIMP_MINGW/bin/libassimp-6.dll" || true
+  copy_runtime_dll libwebpdecoder.dll \
+    "$ASSIMP_MINGW/bin/libwebpdecoder.dll" \
+    "$ASSIMP_MINGW/assimp_webp/libwebpdecoder.dll" \
+    "$ASSIMP_MINGW/assimp_webp/Release/libwebpdecoder.dll" || true
+  copy_runtime_dll zlib1.dll \
+    "$ASSIMP_MINGW/bin/zlib1.dll" \
+    "$MINGW_SYSROOT_BIN/zlib1.dll" || true
+  copy_runtime_dll libwinpthread-1.dll \
+    "$ASSIMP_MINGW/bin/libwinpthread-1.dll" \
+    "$MINGW_SYSROOT_BIN/libwinpthread-1.dll" || true
+fi
+
+file "$OUT/$EXE_NAME" | tee -a "$LOG"
+ls -lh "$OUT/$EXE_NAME" 2>/dev/null | tee -a "$LOG"
+if [[ "$ENABLE_GSPLAT" -eq 1 ]]; then
+  ls -lh "$OUT"/libassimp-6.dll "$OUT"/libwebpdecoder.dll \
+    "$OUT"/zlib1.dll "$OUT"/libwinpthread-1.dll 2>/dev/null | tee -a "$LOG" || true
+  echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND, gsplat/Assimp/Vulkan enabled)"
+else
+  echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND)"
+fi
