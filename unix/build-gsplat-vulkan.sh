@@ -13,7 +13,7 @@ fi
 COMMON=(
   -DHAVE_CONFIG_H -I. -I../unix -I../unix/povconfig -I../platform/unix -I../platform/x86
   -I../unix -I../vfe -I../vfe/unix -I/usr/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT
-  -DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1 -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
+  -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
   -I"$ASSIMP/include" -I"$ASSIMP/build-host/include" -I/usr/include
   -DPOV_HAVE_VULKAN -I"$ROOT/libraries/volk" -I"$VKH/include"
   -pipe -Wno-multichar -Wno-write-strings -fno-enforce-eh-specs -Wno-non-template-friend
@@ -29,6 +29,7 @@ for src in \
   core/render/trace.cpp \
   core/render/tracepixel.cpp \
   parser/reservedwords.cpp \
+  parser/parser.cpp \
   parser/parser_assimp.cpp \
   backend/povray.cpp \
   backend/support/task.cpp

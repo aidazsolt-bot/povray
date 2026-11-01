@@ -179,7 +179,6 @@ struct ExperimentalFlags final
     bool    functionHf              : 1;
     bool    meshCamera              : 1;
     bool    objImport               : 1;
-    bool    plyImport               : 1;
     bool    assimpImport            : 1;
     bool    slopeAltitude           : 1;
     bool    spline                  : 1;
@@ -192,7 +191,6 @@ struct ExperimentalFlags final
         functionHf(false),
         meshCamera(false),
         objImport(false),
-        plyImport(false),
         assimpImport(false),
         slopeAltitude(false),
         spline(false),

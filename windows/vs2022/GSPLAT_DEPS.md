@@ -13,11 +13,15 @@ To enable on your machine:
 5. Copy the Assimp DLL next to the exe (`windows\vs2022\bin64\`).
 6. Ensure a Vulkan ICD is installed (`vulkan-1.dll` from the driver/SDK).
 
-Scene usage:
+Scene usage (Assimp is the only model import path in gsplat builds;
+upstream experimental `mesh { obj ... }` stays off / default-dead):
 
 ```pov
-assimp { "model.ply" }   // or .obj / other Assimp formats
-// inside gaussian_splat options:
+assimp { "model.ply" }              // mesh and/or Gaussians (any Assimp format)
+assimp { "model.obj" }              // meshes + materials (OBJ, glTF, MD5, ...)
+gaussian_splat { "model.ply" ... }  // same Assimp pipeline, splat-oriented options
+mesh { assimp "model.obj" }         // triangle mesh only
+// inside gaussian_splat / assimp splat options:
 backend vulkan
 ```
 

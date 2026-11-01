@@ -43,7 +43,9 @@ Output (default `MINGW_OUT=./build-mingw`):
   `libwinpthread-1.dll`
 
 The exe itself is linked with `-static-libgcc -static-libstdc++` and static
-`libwinpthread`. Ship the Assimp/WebP DLLs beside it for Gaussian-splat imports.
+`libwinpthread`. Ship the Assimp/WebP DLLs beside it for model and Gaussian-splat
+imports (`assimp { }`, `gaussian_splat { }`, `mesh { assimp }`). Upstream
+experimental `mesh { obj }` is not enabled in this build.
 
 `BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
 
@@ -57,7 +59,8 @@ The exe itself is linked with `-static-libgcc -static-libstdc++` and static
 | AVX / AVX2 / FMA optimized noise | Yes (runtime CPUID dispatch; TUs built with `-mavx` / `-mavx2 -mfma` / `-mfma4`) |
 | OpenEXR (`.exr`) | **No** (`OPENEXR_MISSING`) – IlmImf/Half/Iex chain not wired yet |
 | POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
-| Assimp / Gaussian-splat / Vulkan (volk) | Yes (this feature branch) |
+| Assimp / Gaussian-splat / Vulkan (volk) | Yes (this feature branch; sole import path) |
+| Native `mesh { obj }` (upstream experimental) | No (left default-off; use `assimp` / `gaussian_splat`) |
 
 TIFF note: `USE_WIN32_FILEIO` is set **only** when compiling `libraries/tiff/*.c`.
 POV-Ray's `source/base/image/tiff.cpp` uses `TIFFClientOpen` with `void*` client

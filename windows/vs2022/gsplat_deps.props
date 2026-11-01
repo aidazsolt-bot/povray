@@ -49,7 +49,6 @@
       <PreprocessorDefinitions>
         _HAS_AUTO_PTR_ETC=1;
         POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1;
-        POV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1;
         POV_HAVE_VULKAN;
         VK_NO_PROTOTYPES;
         %(PreprocessorDefinitions)

@@ -152,7 +152,6 @@ DEFS=(
   # USE_WIN32_FILEIO is applied only to libraries/tiff/*.c below.
   -DAVOID_WIN32_FILEIO
   -DBUILT_BY='"MinGW-w64 cross (povray.git + Assimp/WebP + vulkan gsplat)"'
-  -DPOV_PARSER_EXPERIMENTAL_OBJ_IMPORT=1
   -DPOV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT=1
   -DPOV_HAVE_VULKAN
   -DVK_NO_PROTOTYPES

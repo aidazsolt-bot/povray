@@ -52,24 +52,20 @@
 /// @{
 
 /// @def POV_PARSER_EXPERIMENTAL_OBJ_IMPORT
-/// Whether experimental Wavefront OBJ import should be enabled.
+/// Whether experimental Wavefront OBJ import (`mesh { obj ... }`) should be enabled.
+/// Upstream leaves this off by default (dead/experimental). This fork does not enable it
+/// in gsplat builds; use POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT with
+/// `assimp { }`, `gaussian_splat { }`, or `mesh { assimp ... }` for meshes, materials,
+/// and Gaussian splats (any format the linked Assimp build can load).
 ///
 #ifndef POV_PARSER_EXPERIMENTAL_OBJ_IMPORT
     #define POV_PARSER_EXPERIMENTAL_OBJ_IMPORT 0
 #endif
 
-/// @def POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-/// Legacy standalone PLY importer (removed). Use POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
-/// and `assimp { "file.ply" }` / `gaussian_splat { "file.ply" }` instead.
-/// Kept as a hard-off define so old -DPOV_PARSER_EXPERIMENTAL_PLY_IMPORT=1 builds fail closed.
-///
-#ifdef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-    #undef POV_PARSER_EXPERIMENTAL_PLY_IMPORT
-#endif
-#define POV_PARSER_EXPERIMENTAL_PLY_IMPORT 0
-
 /// @def POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
-/// Whether experimental Assimp-based model import (meshes, materials, Gaussian splats via Arris API) should be enabled.
+/// Whether Assimp-based model import should be enabled (meshes, materials, and
+/// Gaussian splats via the Arris Assimp API). Sole import path in this fork's
+/// gsplat builds; supersedes the experimental native OBJ importer.
 ///
 #ifndef POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT
     #define POV_PARSER_EXPERIMENTAL_ASSIMP_IMPORT 0

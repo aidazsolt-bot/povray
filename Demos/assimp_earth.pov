@@ -1,5 +1,5 @@
 // Assimp textured globe — Earth.obj
-// Assimp+MTL maps (same assets as native obj import):
+// Assimp+MTL maps (Earth.obj materials):
 //   diffuse/albedo → Earth_albedo.png
 //   height/bump    → Earth_bump.png
 //   specular       → Earth_specular.png (finish Ks/Ns; image noted)

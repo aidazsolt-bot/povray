@@ -351,7 +351,6 @@ void Parser::Run()
     if(mExperimentalFlags.functionHf)           featureList.push_back("function '.hf'");
     if(mExperimentalFlags.meshCamera)           featureList.push_back("mesh camera");
     if(mExperimentalFlags.objImport)            featureList.push_back("wavefront obj import");
-    if(mExperimentalFlags.plyImport)            featureList.push_back("ply import");
     if(mExperimentalFlags.assimpImport)         featureList.push_back("assimp import");
     if(mExperimentalFlags.assimpImport)         featureList.push_back("gaussian_splat");
     if(mExperimentalFlags.slopeAltitude)        featureList.push_back("slope pattern altitude");
