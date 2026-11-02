@@ -92,6 +92,7 @@ AX_ARG_ENABLE([--enable-watch-cursor],     [enable a watch cursor over the displ
 AX_ARG_ENABLE([--enable-debug],            [enable compiler debugging mode])
 AX_ARG_ENABLE([--enable-profile],          [enable program execution profiling])
 AX_ARG_ENABLE([--enable-static],           [enable the linker to create static executable (no run-time dependancy to external libraries, larger binary)])
+AX_ARG_ENABLE([--enable-mingw-gui],        [build POVWIN GUI (MinGW host only; yes/no, default no)])
 AX_ARG_ENABLE([--disable-optimiz],         [disable all compiler optimizations])
 AX_ARG_ENABLE([--disable-optimiz-arch],    [disable architecture-specific compiler optimizations])
 AX_ARG_ENABLE([--disable-pipe],            [disable usage of pipes during compilation (use temporary files instead)])
@@ -927,6 +928,35 @@ AM_CONDITIONAL([BUILD_x86avx], [test x"$pov_avx" != x""])
 AM_CONDITIONAL([BUILD_x86avxfma4], [test x"$pov_avx" != x"" -a x"$pov_fma4" != x"" ])
 AM_CONDITIONAL([BUILD_x86avx2fma3], [test x"$pov_avx2" != x"" -a x"$pov_fma3" != x"" ])
 
+# POVWIN GUI via Autotools (MinGW only). Accepts --enable-mingw-gui[=yes/no].
+pov_mingw_gui="no"
+POV_MINGW_GUI_LDFLAGS=""
+POV_MINGW_GUI_LIBS=""
+if test x"$enable_mingw_gui" = x"yes"; then
+  case "$host" in
+    *mingw*) ;;
+    *) AC_MSG_ERROR([--enable-mingw-gui requires a MinGW --host (got: $host)]) ;;
+  esac
+  AC_CHECK_TOOL([WINDRES], [windres], [no])
+  if test x"$WINDRES" = x"no"; then
+    AC_MSG_ERROR([windres is required for --enable-mingw-gui])
+  fi
+  AC_SUBST([WINDRES])
+  pov_mingw_gui="yes"
+  # Prefer Windows VFE / POVWIN over Unix console display.
+  with_libsdl="no"
+  case "$host" in
+    x86_64-*|amd64-*) CPPFLAGS="$CPPFLAGS -DBUILDING_AMD64=1" ;;
+  esac
+  CPPFLAGS="$CPPFLAGS -DCOMMONCTRL_VERSION=0x500 -DCLASSLIB_DEFS_H -DISOLATION_AWARE_ENABLED -DAVOID_WIN32_FILEIO -DNOMINMAX -D_WIN32_WINNT=0x0601 -DWINVER=0x0601"
+  CXXFLAGS="$CXXFLAGS -Wno-narrowing"
+  POV_MINGW_GUI_LDFLAGS="-mwindows"
+  POV_MINGW_GUI_LIBS="-lcomctl32 -lgdi32 -luser32 -ladvapi32 -lshell32 -lcomdlg32 -lole32 -luuid -lwinmm -lversion -lhtmlhelp -lpsapi -lwininet -ldbghelp -lws2_32"
+fi
+AM_CONDITIONAL([MINGW_GUI], [test x"$pov_mingw_gui" = x"yes"])
+AC_SUBST([POV_MINGW_GUI_LDFLAGS])
+AC_SUBST([POV_MINGW_GUI_LIBS])
+
 
 # Add flags specified at the command line.
 CXXFLAGS=`echo $CXXFLAGS $pov_save_cxxflags`
@@ -1271,6 +1301,7 @@ AC_MSG_RESULT([Built-in features:
 Compilation settings:
   Build architecture:  $build 
   Built/Optimized for: $pov_built_for
+  MinGW POVWIN GUI:    $pov_mingw_gui
   Compiler vendor:     $pov_compiler_vendor
   Compiler version:    $pov_compiler_version
   Compiler flags:      $CXXFLAGS

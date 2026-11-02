@@ -1,332 +1,193 @@
 #!/bin/bash
-# MinGW-w64 cross-build of Windows POV-Ray (scrapes windows/vs* source lists).
-# Frontend: MINGW_FRONTEND=console (default) or gui.
-# console -> $MINGW_OUT/povray.exe
-# gui     -> $MINGW_OUT/pvengine64.exe
+# MinGW-w64 Autotools build (Unix console VFE or POVWIN GUI).
+# Optional editor DLLs are copied into the output dir after make.
 #
-# Autotools Unix-VFE cross remains at windows/mingw/build_autotools_console.sh.
+#   ./windows/mingw/build_console.sh
+#   MINGW_GUI=true ./windows/mingw/build_console.sh -- --enable-static
+#   ./windows/mingw/build_console.sh -- --enable-mingw-gui --enable-static
+#
+# Extra args after "--" go to ./configure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-FRONTEND="${MINGW_FRONTEND:-console}"
+HOST="${MINGW_HOST:-x86_64-w64-mingw32}"
 OUT="${MINGW_OUT:-$ROOT/build-mingw}"
-# Separate object trees so console (_CONSOLE) and gui can share $OUT.
-OBJ="$OUT/obj-$FRONTEND"
-LOG="$OUT/build-$FRONTEND.log"
-CXX="${CXX:-x86_64-w64-mingw32-g++}"
-CC="${CC:-x86_64-w64-mingw32-gcc}"
-WINDRES="${WINDRES:-x86_64-w64-mingw32-windres}"
 JOBS="${JOBS:-$(nproc)}"
-# Prefer vs2022 source lists; fall back to vs2015.
-VSDIR="$ROOT/windows/vs2022"
-[[ -d "$VSDIR" && -f "$VSDIR/povray.vcxproj" ]] || VSDIR="$ROOT/windows/vs2015"
+COMPILED_BY="${COMPILED_BY:-MinGW-w64 cross <povray.git>}"
+CXX="${CXX:-${HOST}-g++}"
+CC="${CC:-${HOST}-gcc}"
+SYSROOT="${MINGW_SYSROOT:-$("$CXX" -print-sysroot 2>/dev/null)/mingw}"
+SYSROOT="${SYSROOT%/}"
 
-case "$FRONTEND" in
-  console|gui) ;;
-  *)
-    echo "MINGW_FRONTEND must be console or gui (got: $FRONTEND)" >&2
-    exit 1
-    ;;
-esac
+# MINGW_GUI=true|yes|1 enables --enable-mingw-gui unless already in PASSTHRU.
+MINGW_GUI_ENV="${MINGW_GUI:-false}"
 
-for tool in "$CXX" "$CC" "$WINDRES" rg realpath md5sum python3; do
+PASSTHRU=()
+if [[ "${1:-}" == "--" ]]; then
+  shift
+  PASSTHRU=("$@")
+elif [[ $# -gt 0 ]]; then
+  PASSTHRU=("$@")
+fi
+
+for tool in "$CXX" "$CC" make; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Missing tool: $tool" >&2
     exit 1
   fi
 done
 
-mkdir -p "$OBJ"
-: > "$LOG"
-
-if [[ "$FRONTEND" == "gui" ]]; then
-  PROJECTS=(
-    povray
-    rtrsupport
-    vfewin
-    povbase
-    povcore
-    povbackend
-    povfrontend
-    povparser
-    povms
-    povvm
-    povplatform
-    zlib
-    libpng
-    jpeg
-    tiff
-  )
-  EXE_NAME="pvengine64.exe"
-else
-  PROJECTS=(
-    console
-    vfewin
-    povbase
-    povcore
-    povbackend
-    povfrontend
-    povparser
-    povms
-    povvm
-    povplatform
-    zlib
-    libpng
-    jpeg
-    tiff
-  )
-  EXE_NAME="povray.exe"
-fi
-
-# Collect ClCompile Include= paths from VS projects (relative to windows/vs*).
-mapfile -t REL_SRCS < <(
-  for p in "${PROJECTS[@]}"; do
-    rg -oN 'ClCompile Include="([^"]+)"' -r '$1' "$VSDIR/$p.vcxproj" || true
-  done | sed 's|\\|/|g' | while read -r rel; do
-    realpath -m "$VSDIR/$rel"
-  done | awk '!seen[$0]++'
-)
-
-# Skip OpenEXR for now (multi-lib IlmImf/Half/Iex chain not wired yet).
-# Skip povms.c: VS excludes it; povms.cpp pulls it in as C++.
-FILTERED=()
-for s in "${REL_SRCS[@]}"; do
-  case "$s" in
-    */openexr.cpp) continue ;;
-    */povms/povms.c) continue ;;
-  esac
-  FILTERED+=("$s")
+newest_src="$ROOT/unix/configure.ac"
+for f in "$ROOT/unix/config"/ax_check_lib*.m4 \
+         "$ROOT/vfe/Makefile.am" "$ROOT/platform/Makefile.am" \
+         "$ROOT/unix/Makefile.am" "$ROOT/source/Makefile.am"; do
+  [[ -f "$f" && "$f" -nt "$newest_src" ]] && newest_src="$f"
 done
-
-# tif_extension.c is not listed in tiff.vcxproj but provides TIFFGetTagList*
-# symbols referenced by tif_print.c (needed for a complete static MinGW link).
-FILTERED+=("$ROOT/libraries/tiff/libtiff/tif_extension.c")
-
-# libpng expects pnglibconf.h (VS generates it; use upstream prebuilt).
-# libtiff expects tif_config.h / tiffconf.h (VS uses the .vc templates).
-mkdir -p "$OUT/include"
-cp -n "$ROOT/libraries/png/scripts/pnglibconf.h.prebuilt" "$OUT/include/pnglibconf.h"
-cp -f "$ROOT/libraries/tiff/libtiff/tif_config.h.vc" "$OUT/include/tif_config.h"
-cp -f "$ROOT/libraries/tiff/libtiff/tiffconf.h.vc" "$OUT/include/tiffconf.h"
-
-INCLUDES=(
-  -I"$OUT/include"
-  -I"$ROOT/windows/povconfig"
-  -I"$ROOT/windows"
-  -I"$ROOT/windows/rtrsupport"
-  -I"$ROOT/source"
-  -I"$ROOT/source/base"
-  -I"$ROOT/source/backend"
-  -I"$ROOT/source/frontend"
-  -I"$ROOT/platform/windows"
-  -I"$ROOT/platform/x86"
-  -I"$ROOT/vfe"
-  -I"$ROOT/vfe/win"
-  -I"$ROOT/libraries/boost"
-  -I"$ROOT/libraries/zlib"
-  -I"$ROOT/libraries/png"
-  -I"$ROOT/libraries/jpeg"
-  -I"$ROOT/libraries/tiff/libtiff"
-)
-
-DEFS=(
-  -DNDEBUG
-  -DWIN32
-  -D_WINDOWS
-  -DNOMINMAX
-  # Note: omit WIN32_LEAN_AND_MEAN so tif_win32.c gets MessageBox/LPTSTR from windows.h
-  -DBOOST_ALL_NO_LIB
-  -D_CRT_SECURE_NO_DEPRECATE
-  -D_WIN32_WINNT=0x0601
-  -DWINVER=0x0601
-  -DBUILDING_AMD64=1
-  -DOPENEXR_MISSING
-  # POV-Ray's tiff.cpp uses TIFFClientOpen with void* client handles.
-  # USE_WIN32_FILEIO is applied only to libraries/tiff/*.c below.
-  -DAVOID_WIN32_FILEIO
-  -DBUILT_BY='"MinGW-w64 cross (povray.git Windows VFE)"'
-)
-
-if [[ "$FRONTEND" == "console" ]]; then
-  DEFS+=(-D_CONSOLE)
-else
-  DEFS+=(
-    -DCOMMONCTRL_VERSION=0x500
-    -DCLASSLIB_DEFS_H
-    -DISOLATION_AWARE_ENABLED
-  )
+if [[ ! -x "$ROOT/configure" || "$newest_src" -nt "$ROOT/configure" ]]; then
+  echo "Running unix/prebuild.sh (aclocal/autoconf/automake)..."
+  (cd "$ROOT/unix" && ./prebuild.sh)
 fi
 
-CXXFLAGS=(-std=c++17 -O2 -ffast-math -pthread "${DEFS[@]}" "${INCLUDES[@]}")
-# GUI sources use MSVC-tolerant initializers (e.g. -1 into WORD/unsigned).
-if [[ "$FRONTEND" == "gui" ]]; then
-  CXXFLAGS+=(-Wno-narrowing)
-fi
-# tif_dirinfo.c: MSVC-oriented lfind/_lfind callback prototype mismatch under GCC.
-CFLAGS=(-O2 -Wno-incompatible-pointer-types "${DEFS[@]}" "${INCLUDES[@]}")
+echo "Cleaning in-tree host objects/config that would confuse the cross build..."
+find "$ROOT/source" "$ROOT/vfe" "$ROOT/platform" "$ROOT/unix" "$ROOT/windows" \
+  \( -name '*.o' -o -name '*.lo' -o -name '*.a' -o -name '.libs' -o -name '.deps' \) \
+  -print0 2>/dev/null | xargs -0r rm -rf
+rm -f "$ROOT/unix/config.h" "$ROOT/config.h" "$ROOT/unix/config.log" "$ROOT/unix/config.status"
 
-echo "Frontend=$FRONTEND  Sources: ${#FILTERED[@]}  CXX=$CXX  OUT=$OUT/$EXE_NAME" | tee -a "$LOG"
+mkdir -p "$OUT"
+cd "$OUT"
 
-printf '%s\n' "${CFLAGS[@]}" >"$OBJ/cflags.txt"
-printf '%s\n' "${CXXFLAGS[@]}" >"$OBJ/cxxflags.txt"
+export CPPFLAGS="${CPPFLAGS:-}${CPPFLAGS:+ }-I$ROOT/libraries/boost"
 
-compile_one_file() {
-  local src="$1"
-  local base hash obj
-  base="$(basename "$src")"
-  hash="$(printf '%s' "$src" | md5sum | awk '{print $1}')"
-  mapfile -t CFLAGS <"$OBJ/cflags.txt"
-  mapfile -t CXXFLAGS <"$OBJ/cxxflags.txt"
-  case "$src" in
-    */povms.c|*/povmsutil.c)
-      # POVMS C sources must be compiled as C++ in-tree.
-      obj="$OBJ/${base%.c}.$hash.o"
-      [[ -f "$obj" && "$obj" -nt "$src" ]] && { echo "SKIP $src"; return 0; }
-      echo "CXX $src (as C++)"
-      if ! "$CXX" "${CXXFLAGS[@]}" -x c++ -c -o "$obj" "$src" 2>>"$LOG"; then
-        echo "FAIL $src" | tee -a "$LOG"
-        return 1
-      fi
-      ;;
-    *.c)
-      obj="$OBJ/${base%.c}.$hash.o"
-      [[ -f "$obj" && "$obj" -nt "$src" ]] && { echo "SKIP $src"; return 0; }
-      cextra=()
-      case "$src" in
-        */libraries/tiff/*)
-          # Native Win32 file procs for libtiff itself.
-          cextra=(-UAVOID_WIN32_FILEIO -DUSE_WIN32_FILEIO)
-          ;;
-      esac
-      echo "CC  $src ${cextra[*]:-}"
-      if ! "$CC" "${CFLAGS[@]}" "${cextra[@]}" -c -o "$obj" "$src" 2>>"$LOG"; then
-        echo "FAIL $src" | tee -a "$LOG"
-        return 1
-      fi
-      ;;
-    *)
-      obj="$OBJ/${base%.cpp}.$hash.o"
-      [[ -f "$obj" && "$obj" -nt "$src" ]] && { echo "SKIP $src"; return 0; }
-      extra=()
-      case "$src" in
-        */avx2fma3/*) extra=(-mavx2 -mfma) ;;
-        */avxfma4/*)  extra=(-mavx -mfma4) ;;
-        */avx/*)      extra=(-mavx) ;;
-        */winprecomp.cpp)
-          # VS uses this as PCH creator; MinGW just compiles it as a normal TU.
-          extra=(-Wno-unused)
-          ;;
-      esac
-      echo "CXX $src ${extra[*]:-}"
-      if ! "$CXX" "${CXXFLAGS[@]}" "${extra[@]}" -c -o "$obj" "$src" 2>>"$LOG"; then
-        echo "FAIL $src" | tee -a "$LOG"
-        return 1
-      fi
-      ;;
+CONFIGURE_ARGS=(
+  --host="$HOST"
+  --prefix="$OUT/install"
+  "COMPILED_BY=$COMPILED_BY"
+  CC="$CC"
+  CXX="$CXX"
+)
+
+have_mingw_gui_flag=0
+for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+  case "$a" in
+    --enable-mingw-gui|--enable-mingw-gui=*|--disable-mingw-gui) have_mingw_gui_flag=1 ;;
   esac
-}
-export -f compile_one_file
-export CC CXX OBJ LOG OUT
-
-printf '%s\n' "${FILTERED[@]}" >"$OBJ/sources.txt"
-if ! cat "$OBJ/sources.txt" | xargs -P "$JOBS" -I{} bash -c 'compile_one_file "$@"' _ {}; then
-  echo "Compile failed; see $LOG" >&2
-  rg -n 'error:|FATAL|FAIL ' "$LOG" | tail -40 >&2 || true
-  exit 1
-fi
-
-RC_OBJ=""
-if [[ "$FRONTEND" == "gui" ]]; then
-  RC_OBJ="$OBJ/pvengine.rc.o"
-  RC_MINGW="$ROOT/windows/pvengine_mingw.rc"
-  echo "Generate $RC_MINGW (posix path case) + WINDRES" | tee -a "$LOG"
-  python3 - "$ROOT/windows" "$RC_MINGW" <<'PY'
-import re, sys
-from pathlib import Path
-win = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-text = (win / "pvengine.rc").read_text(errors="replace")
-index = {}
-for p in win.rglob("*"):
-    if p.is_file():
-        rel = p.relative_to(win).as_posix()
-        index[rel.lower()] = rel
-
-def fix_quoted(m):
-    s = m.group(1).replace("\\\\", "/").replace("\\", "/")
-    return '"' + index.get(s.lower(), s) + '"'
-
-dst.write_text(re.sub(r'"([^"\n]*)"', fix_quoted, text))
-PY
-  (
-    cd "$ROOT/windows"
-    "$WINDRES" -I. -Ipovconfig -DNDEBUG -o "$RC_OBJ" "$(basename "$RC_MINGW")"
-  ) 2>>"$LOG" || {
-    echo "windres failed; see $LOG" >&2
-    rg -n 'error:|FATAL|FAIL |undefined|can.t open' "$LOG" | tail -40 >&2 || true
-    exit 1
-  }
-fi
-
-# Collect objects after windres so pvengine.rc.o is included once.
-mapfile -t OBJS < <(find "$OBJ" -name '*.o' | sort)
-
-echo "Linking ${#OBJS[@]} objects -> $OUT/$EXE_NAME" | tee -a "$LOG"
-# Static libgcc/libstdc++/winpthread for the exe.
-LINK_COMMON=(-O2 -pthread -static-libgcc -static-libstdc++
-  -Wl,-Bstatic -Wl,--whole-archive -lwinpthread -Wl,--no-whole-archive
-  -Wl,-Bdynamic -lws2_32)
-LINK_LIBS=()
-
-if [[ "$FRONTEND" == "gui" ]]; then
-  # MinGW CRT enters via WinMain; do not use MSVC's POVWINStartup entry.
-  LINK_COMMON+=(-mwindows)
-  LINK_LIBS+=(
-    -lcomctl32 -lgdi32 -luser32 -ladvapi32 -lshell32 -lcomdlg32
-    -lole32 -luuid -lwinmm -lversion -lhtmlhelp -lpsapi -lwininet -ldbghelp
-  )
-fi
-
-"$CXX" "${LINK_COMMON[@]}" -o "$OUT/$EXE_NAME" "${OBJS[@]}" "${LINK_LIBS[@]}" -lstdc++fs 2>>"$LOG" || {
-  # retry without libstdc++fs (may be header-only in newer libstdc++)
-  "$CXX" "${LINK_COMMON[@]}" -o "$OUT/$EXE_NAME" "${OBJS[@]}" "${LINK_LIBS[@]}" 2>>"$LOG"
-}
-
-MINGW_SYSROOT_BIN="/usr/x86_64-w64-mingw32/sys-root/mingw/bin"
-copy_runtime_dll() {
-  local name="$1"
-  shift
-  local src
-  for src in "$@"; do
-    if [[ -f "$src" ]]; then
-      cp -f "$src" "$OUT/$name"
-      echo "Runtime DLL: $OUT/$name  (from $src)" | tee -a "$LOG"
-      return 0
+done
+case "${MINGW_GUI_ENV,,}" in
+  true|yes|1)
+    if (( ! have_mingw_gui_flag )); then
+      CONFIGURE_ARGS+=(--enable-mingw-gui)
+      have_mingw_gui_flag=1
     fi
-  done
-  echo "WARN: missing runtime DLL $name (searched: $*)" | tee -a "$LOG"
-  return 1
-}
-# Vendored zlib is static-linked; ship winpthread only if anything dynamic needs it.
-copy_runtime_dll libwinpthread-1.dll "$MINGW_SYSROOT_BIN/libwinpthread-1.dll" || true
+    ;;
+esac
 
-# Optional POVWIN editor DLLs (cmedit + povcmax) from gitignored ./shipped_dll/
-if [[ "$FRONTEND" == "gui" ]]; then
+append_with_or_without() {
+  local opt="$1" libfile="$2"
+  local a
+  for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+    case "$a" in
+      --with-${opt}|--with-${opt}=*|--without-${opt}) return 0 ;;
+    esac
+  done
+  if [[ -n "$SYSROOT" && -e "$SYSROOT/lib/$libfile" ]]; then
+    CONFIGURE_ARGS+=("--with-${opt}=$SYSROOT/lib")
+  else
+    CONFIGURE_ARGS+=("--without-${opt}")
+    NEED_NON_REDIST=1
+  fi
+}
+
+NEED_NON_REDIST=0
+append_with_or_without zlib libz.dll.a
+# Static .a is enough when only libpng.a exists; prefer import lib if present.
+if [[ -e "$SYSROOT/lib/libpng.dll.a" ]]; then
+  append_with_or_without libpng libpng.dll.a
+elif [[ -e "$SYSROOT/lib/libpng.a" ]]; then
+  append_with_or_without libpng libpng.a
+else
+  append_with_or_without libpng libpng.dll.a
+fi
+if [[ -e "$SYSROOT/lib/libjpeg.dll.a" || -e "$SYSROOT/lib/libjpeg.a" ]]; then
+  append_with_or_without libjpeg libjpeg.dll.a
+elif [[ -e "$SYSROOT/lib/libjpeg-62.dll.a" ]]; then
+  append_with_or_without libjpeg libjpeg-62.dll.a
+else
+  append_with_or_without libjpeg libjpeg.dll.a
+fi
+append_with_or_without libtiff libtiff.dll.a
+
+have_passthru_sdl=0
+have_passthru_exr=0
+for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+  case "$a" in
+    --with-libsdl|--with-libsdl=*|--without-libsdl) have_passthru_sdl=1 ;;
+    --with-openexr|--with-openexr=*|--without-openexr) have_passthru_exr=1 ;;
+  esac
+done
+(( have_passthru_sdl )) || CONFIGURE_ARGS+=(--without-libsdl)
+(( have_passthru_exr )) || CONFIGURE_ARGS+=(--without-openexr)
+
+if (( NEED_NON_REDIST )); then
+  already=0
+  for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+    case "$a" in NON_REDISTRIBUTABLE_BUILD=*) already=1 ;; esac
+  done
+  (( already )) || CONFIGURE_ARGS+=("NON_REDISTRIBUTABLE_BUILD=yes")
+  echo "NOTE: some image libs missing in $SYSROOT - using NON_REDISTRIBUTABLE_BUILD" >&2
+fi
+
+echo "Configuring: --host=$HOST  out=$OUT"
+"$ROOT/configure" "${CONFIGURE_ARGS[@]}" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"
+
+echo "Building with make -j$JOBS"
+make -j"$JOBS"
+
+GUI_MODE=0
+if (( have_mingw_gui_flag )); then
+  for a in "${CONFIGURE_ARGS[@]}" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
+    case "$a" in
+      --enable-mingw-gui|--enable-mingw-gui=yes) GUI_MODE=1 ;;
+      --disable-mingw-gui|--enable-mingw-gui=no) GUI_MODE=0 ;;
+    esac
+  done
+fi
+
+if (( GUI_MODE )); then
+  BIN="$(find "$OUT" -maxdepth 4 -type f \( -name 'pvengine.exe' -o -name 'pvengine' \) ! -path '*/.libs/*' | head -1 || true)"
+  [[ -z "$BIN" && -f "$OUT/unix/.libs/pvengine.exe" ]] && BIN="$OUT/unix/.libs/pvengine.exe"
+  if [[ -n "$BIN" ]]; then
+    cp -f "$BIN" "$OUT/pvengine64.exe"
+    file "$OUT/pvengine64.exe" || true
+    ls -lh "$OUT/pvengine64.exe"
+  else
+    echo "Build finished but pvengine binary not found under $OUT" >&2
+    exit 1
+  fi
+  # Optional POVWIN editor DLLs only (no compile scrape).
   SHIPPED_DLL="${SHIPPED_DLL:-$ROOT/shipped_dll}"
   if [[ -d "$SHIPPED_DLL" ]]; then
     for ed in cmedit64.dll povcmax64.dll cmedit32.dll povcmax32.dll \
               cmedit32-sse2.dll povcmax32-sse2.dll; do
       if [[ -f "$SHIPPED_DLL/$ed" ]]; then
         cp -f "$SHIPPED_DLL/$ed" "$OUT/$ed"
-        echo "Editor DLL: $OUT/$ed" | tee -a "$LOG"
+        echo "Editor DLL: $OUT/$ed"
       fi
     done
   else
-    echo "NOTE: no $SHIPPED_DLL - GUI File/Open editor menus need cmedit64.dll + povcmax64.dll" | tee -a "$LOG"
+    echo "NOTE: no $SHIPPED_DLL - GUI editor menus need cmedit64.dll + povcmax64.dll"
+  fi
+  echo "DONE $OUT/pvengine64.exe (mingw-gui)"
+else
+  BIN="$(find "$OUT" -maxdepth 4 -type f \( -name 'povray.exe' -o -name 'povray' \) ! -path '*/.libs/*' | head -1 || true)"
+  [[ -z "$BIN" && -f "$OUT/unix/.libs/povray.exe" ]] && BIN="$OUT/unix/.libs/povray.exe"
+  if [[ -n "$BIN" ]]; then
+    cp -f "$BIN" "$OUT/povray.exe"
+    file "$OUT/povray.exe" || true
+    ls -lh "$OUT/povray.exe"
+    echo "DONE $OUT/povray.exe (host=$HOST)"
+  else
+    echo "Build finished but povray binary not found under $OUT" >&2
+    exit 1
   fi
 fi
-
-file "$OUT/$EXE_NAME" | tee -a "$LOG"
-ls -lh "$OUT/$EXE_NAME" "$OUT"/libwinpthread-1.dll \
-  "$OUT"/cmedit64.dll "$OUT"/povcmax64.dll 2>/dev/null | tee -a "$LOG" || true
-echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND)"
