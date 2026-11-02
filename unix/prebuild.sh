@@ -506,6 +506,28 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/vfe/win
 
 else
+if MINGW_WINDOWS
+
+# MinGW console: Windows VFE (winconsole), not Unix VFE.
+bin_PROGRAMS = povray
+
+povray_SOURCES = \\
+  \$(top_srcdir)/vfe/win/console/winconsole.cpp
+
+povray_CPPFLAGS = \$(AM_CPPFLAGS) -D_CONSOLE
+povray_LDADD = \$(LDADD_COMMON) \$(POV_MINGW_CONSOLE_LIBS)
+
+AM_CPPFLAGS = \\
+  -I\$(top_srcdir)/windows/povconfig \\
+  -I\$(top_srcdir)/windows \\
+  -I\$(top_srcdir)/source \\
+  -I\$(top_builddir)/source \\
+  -I\$(top_srcdir)/platform/windows \\
+  \$(cppflags_platformcpu) \\
+  -I\$(top_srcdir)/vfe \\
+  -I\$(top_srcdir)/vfe/win
+
+else
 
 bin_PROGRAMS = povray
 
@@ -525,6 +547,7 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/vfe \\
   -I\$(top_srcdir)/vfe/unix
 
+endif
 endif
 pbEOF
   ;;
@@ -879,7 +902,7 @@ cppflags_platformcpu += -I\$(top_srcdir)/platform/x86
 endif
 
 # Include paths for headers.
-if MINGW_GUI
+if MINGW_WINDOWS
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/windows/povconfig \\
   -I\$(top_srcdir)/windows \\
@@ -1418,8 +1441,8 @@ case "$1" in
 # Libraries to build.
 noinst_LIBRARIES = libvfe.a
 
-# Source files.
-if MINGW_GUI
+# Source files. MinGW host always uses Windows VFE (GUI or winconsole).
+if MINGW_WINDOWS
 libvfe_a_SOURCES = \\
   `echo $files_win`
 else
@@ -1433,7 +1456,7 @@ cppflags_platformcpu += -I\$(top_srcdir)/platform/x86
 endif
 
 # Include paths for headers.
-if MINGW_GUI
+if MINGW_WINDOWS
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/windows/povconfig \\
   -I\$(top_srcdir)/windows \\
@@ -1532,8 +1555,8 @@ noinst_LIBRARIES = \\
   libplatform.a \\
   \$(libraries_platformcpu)
 
-# Source files.
-if MINGW_GUI
+# Source files. MinGW host always uses Windows platform layer.
+if MINGW_WINDOWS
 libplatform_a_SOURCES = \\
   `echo $files_win`
 else
@@ -1542,7 +1565,7 @@ libplatform_a_SOURCES = \\
 endif
 
 # Include paths for headers.
-if MINGW_GUI
+if MINGW_WINDOWS
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/windows/povconfig \\
   -I\$(top_srcdir)/windows \\

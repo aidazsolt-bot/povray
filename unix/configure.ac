@@ -981,34 +981,47 @@ AM_CONDITIONAL([BUILD_x86avx], [test x"$pov_avx" != x""])
 AM_CONDITIONAL([BUILD_x86avxfma4], [test x"$pov_avx" != x"" -a x"$pov_fma4" != x"" ])
 AM_CONDITIONAL([BUILD_x86avx2fma3], [test x"$pov_avx2" != x"" -a x"$pov_fma3" != x"" ])
 
-# POVWIN GUI via Autotools (MinGW only). Accepts --enable-mingw-gui[=yes/no].
+# MinGW --host: always use Windows platform + Windows VFE (not Unix VFE).
+# --enable-mingw-gui additionally builds POVWIN (pvengine) instead of console.
+pov_mingw_windows="no"
 pov_mingw_gui="no"
 POV_MINGW_GUI_LDFLAGS=""
 POV_MINGW_GUI_LIBS=""
+POV_MINGW_CONSOLE_LIBS=""
+case "$host" in
+  *mingw*)
+    pov_mingw_windows="yes"
+    with_libsdl="no"
+    case "$host" in
+      x86_64-*|amd64-*) CPPFLAGS="$CPPFLAGS -DBUILDING_AMD64=1" ;;
+    esac
+    CPPFLAGS="$CPPFLAGS -DAVOID_WIN32_FILEIO -DNOMINMAX -D_WIN32_WINNT=0x0601 -DWINVER=0x0601"
+    CXXFLAGS="$CXXFLAGS -Wno-narrowing"
+    POV_MINGW_CONSOLE_LIBS="-luser32 -ladvapi32 -lshell32 -lws2_32"
+    ;;
+esac
 if test x"$enable_mingw_gui" = x"yes"; then
-  case "$host" in
-    *mingw*) ;;
-    *) AC_MSG_ERROR([--enable-mingw-gui requires a MinGW --host (got: $host)]) ;;
-  esac
+  if test x"$pov_mingw_windows" != x"yes"; then
+    AC_MSG_ERROR([--enable-mingw-gui requires a MinGW --host (got: $host)])
+  fi
   AC_CHECK_TOOL([WINDRES], [windres], [no])
   if test x"$WINDRES" = x"no"; then
     AC_MSG_ERROR([windres is required for --enable-mingw-gui])
   fi
   AC_SUBST([WINDRES])
   pov_mingw_gui="yes"
-  # Prefer Windows VFE / POVWIN over Unix console display.
-  with_libsdl="no"
-  case "$host" in
-    x86_64-*|amd64-*) CPPFLAGS="$CPPFLAGS -DBUILDING_AMD64=1" ;;
-  esac
-  CPPFLAGS="$CPPFLAGS -DCOMMONCTRL_VERSION=0x500 -DCLASSLIB_DEFS_H -DISOLATION_AWARE_ENABLED -DAVOID_WIN32_FILEIO -DNOMINMAX -D_WIN32_WINNT=0x0601 -DWINVER=0x0601"
-  CXXFLAGS="$CXXFLAGS -Wno-narrowing"
+  CPPFLAGS="$CPPFLAGS -DCOMMONCTRL_VERSION=0x500 -DCLASSLIB_DEFS_H -DISOLATION_AWARE_ENABLED"
   POV_MINGW_GUI_LDFLAGS="-mwindows"
   POV_MINGW_GUI_LIBS="-lcomctl32 -lgdi32 -luser32 -ladvapi32 -lshell32 -lcomdlg32 -lole32 -luuid -lwinmm -lversion -lhtmlhelp -lpsapi -lwininet -ldbghelp -lws2_32"
+elif test x"$pov_mingw_windows" = x"yes"; then
+  # Console MinGW: required by windows/povconfig/syspovconfig.h + winconsole.
+  CPPFLAGS="$CPPFLAGS -D_CONSOLE"
 fi
+AM_CONDITIONAL([MINGW_WINDOWS], [test x"$pov_mingw_windows" = x"yes"])
 AM_CONDITIONAL([MINGW_GUI], [test x"$pov_mingw_gui" = x"yes"])
 AC_SUBST([POV_MINGW_GUI_LDFLAGS])
 AC_SUBST([POV_MINGW_GUI_LIBS])
+AC_SUBST([POV_MINGW_CONSOLE_LIBS])
 
 
 # Add flags specified at the command line.
@@ -1356,6 +1369,7 @@ AC_MSG_RESULT([Built-in features:
 Compilation settings:
   Build architecture:  $build 
   Built/Optimized for: $pov_built_for
+  MinGW Windows VFE:   $pov_mingw_windows
   MinGW POVWIN GUI:    $pov_mingw_gui
   Compiler vendor:     $pov_compiler_vendor
   Compiler version:    $pov_compiler_version
