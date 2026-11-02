@@ -33,6 +33,9 @@
 ///
 //******************************************************************************
 
+// must come first, will pull in "config.h" for HAVE_* macros
+#include "syspovconfig.h"
+
 // C++ variants of C standard header files
 #include <cstdio>
 #include <csignal>
