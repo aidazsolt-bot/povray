@@ -390,7 +390,12 @@ namespace vfePlatform
         }
         else
         {
+#ifdef HAVE_SYS_WAIT_H
             m_ExitCode = WEXITSTATUS(result);
+#else
+            // MinGW/Windows: std::system() does not return a wait(2) status word.
+            m_ExitCode = result;
+#endif
         }
 #endif
 

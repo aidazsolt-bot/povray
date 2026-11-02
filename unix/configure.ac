@@ -532,7 +532,10 @@ esac
 # Language constructs.
 
 AC_HEADER_TIME
-AC_CHECK_HEADERS([time.h limits.h sys/resource.h sys/time.h sys/wait.h unistd.h])
+AC_CHECK_HEADERS([time.h limits.h sys/resource.h sys/time.h sys/wait.h unistd.h termios.h sys/select.h])
+# POSIX sigset_t / sigwait path used by vfe/unix/unixconsole.cpp (absent on MinGW).
+AC_CHECK_TYPES([sigset_t], [], [], [[#include <signal.h>]])
+AC_CHECK_FUNCS([sigwait sigtimedwait])
 
 AC_TYPE_INT8_T
 AC_TYPE_INT16_T

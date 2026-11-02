@@ -40,11 +40,14 @@ if [[ ! -x "$ROOT/configure" || "$newest_src" -nt "$ROOT/configure" ]]; then
   (cd "$ROOT/unix" && ./prebuild.sh)
 fi
 
-# VPATH would reuse host *.o from an in-tree Linux build.
-echo "Cleaning in-tree host objects that would confuse VPATH..."
+# VPATH / quoted #include "config.h" would pick up a stale in-tree Linux
+# unix/config.h (and host *.o) ahead of the MinGW out-of-tree build.
+echo "Cleaning in-tree host objects/config that would confuse the cross build..."
 find "$ROOT/source" "$ROOT/vfe" "$ROOT/platform" "$ROOT/unix" \
   \( -name '*.o' -o -name '*.lo' -o -name '*.a' -o -name '.libs' -o -name '.deps' \) \
   -print0 2>/dev/null | xargs -0r rm -rf
+rm -f "$ROOT/unix/config.h" "$ROOT/config.h" "$ROOT/unix/config.log" "$ROOT/unix/config.status"
+
 
 mkdir -p "$OUT"
 cd "$OUT"

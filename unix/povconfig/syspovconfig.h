@@ -277,6 +277,10 @@
     // MinGW-w64 (native MSYS/MinGW or Autotools --host=...-mingw32 cross).
     // Experimental Unix-frontend Windows build; POSIX-ish settings.
     #include "syspovconfig_posix.h"
+    // Same as syspovconfig_gnu.h: expose GCC/x86 intrinsics for AVX noise TUs.
+    #if defined(__x86_64__) || defined(__i386__)
+        #define MACHINE_INTRINSICS_H <x86intrin.h>
+    #endif
 #elif defined(__CYGWIN__)
     // Cygwin detected.
     // Not officially supported yet; comment-out the following line to try with default POSIX settings.
