@@ -30,14 +30,15 @@ _PATH_EXTS = (
 def looks_like_path(s: str) -> bool:
     if not s:
         return False
+    # Normalize only for extension / separator checks. Do not use that form to
+    # detect paths before classifying \\t/\\n captions - replacing "\\" with "/"
+    # would turn "\\tAlt" into "/tAlt" and false-positive as a path.
     low = s.lower().replace("\\\\", "/").replace("\\", "/")
-    # Resource paths first (note: "\toolbar\..." contains the two chars "\"+"t").
-    if "/" in low or any(low.endswith(ext) for ext in _PATH_EXTS):
+    if any(low.endswith(ext) for ext in _PATH_EXTS):
         return True
-    # Menu/LTEXT captions with accelerator or newline escapes - not paths.
     if re.search(r"\\[tnr]", s):
         return False
-    return False
+    return "/" in low or "\\" in s
 
 
 def fix_quoted(m):
