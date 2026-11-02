@@ -44,6 +44,7 @@
 
 // C++ standard header files
 #include <algorithm>
+#include <limits>
 
 // POV-Ray header files (base module)
 #include "base/povassert.h"
