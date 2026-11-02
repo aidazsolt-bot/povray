@@ -4,9 +4,11 @@
 #
 # DESCRIPTION
 #
-#   Locate Vulkan headers and libvulkan for Gaussian-splat compute.
-#   vulkan_headers_root should contain include/vulkan/vulkan.h (Khronos
-#   Vulkan-Headers tree or system prefix). Also adds -I for in-tree volk.
+#   Locate Vulkan headers for Gaussian-splat compute. Prefer linking
+#   libvulkan when available (Linux). On MinGW/Windows (and any host where
+#   the loader lib is missing) fall back to in-tree volk + VK_NO_PROTOTYPES
+#   and load vulkan-1.dll / libvulkan.so.1 at runtime - matching the MSVC
+#   gsplat_deps.props path (no vulkan import lib required at link time).
 #   On success sets ax_check_vulkan_gsplat=ok and appends CPPFLAGS / LIBS
 #   (including -DPOV_HAVE_VULKAN).
 
@@ -62,8 +64,16 @@ AC_DEFUN([AX_CHECK_VULKAN_GSPLAT],
             ],
             [
               LIBS="$ax_vk_save_libs"
-              ax_check_vulkan_gsplat="libvulkan not found"
               AC_MSG_RESULT([no])
+              # MinGW / Windows: volk loads vulkan-1.dll at runtime.
+              if test -d "$ax_volk_inc"; then
+                AC_MSG_CHECKING([for volk runtime loader (no libvulkan at link)])
+                ax_check_vulkan_gsplat="ok"
+                CPPFLAGS="-DPOV_HAVE_VULKAN -DVK_NO_PROTOTYPES $CPPFLAGS"
+                AC_MSG_RESULT([yes])
+              else
+                ax_check_vulkan_gsplat="libvulkan not found"
+              fi
             ]
           )
         ]
