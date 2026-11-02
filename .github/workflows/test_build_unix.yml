@@ -86,3 +86,39 @@ jobs:
         path: artifact_diag_${{ matrix.os }}_${{ matrix.c-compiler }}.tar.gz
 
     # TODO: Maybe do some basic installation checking.
+
+  build_mingw:
+    name: 'MinGW ${{ matrix.os }} console'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
+    steps:
+
+    - name: 'Matrix Diagnostics'
+      shell: bash
+      run: |
+        echo '${{ toJSON(matrix) }}'
+        x86_64-w64-mingw32-g++ --version || true
+
+    - name: 'Check out Repository'
+      uses: actions/checkout@v7
+
+    - name: 'Install MinGW Prerequisites'
+      uses: ./.github/actions/mingw_getlibs
+
+    - name: 'Build'
+      uses: ./.github/actions/mingw_build
+      with:
+        out-dir: build-mingw-ci-${{ matrix.os }}
+
+    - name: 'Sanity-Check Working Tree'
+      uses: ./.github/actions/git_check_repo
+
+    - name: 'Upload MinGW Binary'
+      if: ${{ success() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: artifact_bin_mingw_${{ matrix.os }}
+        path: build-mingw-ci-${{ matrix.os }}/povray.exe

@@ -87,3 +87,27 @@ jobs:
         msbuild-options: ''
     - name: 'Sanity-Check Working Tree'
       uses: ./.github/actions/git_check_repo
+
+  build_mingw:
+    name: 'MinGW Build Test'
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: 'Check out Repository'
+      uses: actions/checkout@v7
+
+    - name: 'Install MinGW Prerequisites'
+      uses: ./.github/actions/mingw_getlibs
+
+    - name: 'Build'
+      uses: ./.github/actions/mingw_build
+
+    - name: 'Sanity-Check Working Tree'
+      uses: ./.github/actions/git_check_repo
+
+    - name: 'Upload MinGW Binary'
+      if: ${{ success() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: artifact_bin_mingw_console
+        path: build-mingw-ci/povray.exe

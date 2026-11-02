@@ -1,0 +1,25 @@
+name: 'Install MinGW Cross Packages'
+description: 'Install MinGW-w64 toolchain and Autotools for a Windows console cross build'
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: |
+      set -euo pipefail
+      echo "::group::Update package manager database"
+      sudo apt-get update
+      echo "::endgroup::"
+      echo "::group::Install MinGW-w64 cross toolchain"
+      # zlib is available as a MinGW package on Ubuntu; PNG/JPEG/TIFF are not,
+      # so the build step disables those via NON_REDISTRIBUTABLE_BUILD.
+      sudo apt-get install --no-upgrade -y \
+        autoconf \
+        automake \
+        g++-mingw-w64-x86-64 \
+        gcc-mingw-w64-x86-64 \
+        libz-mingw-w64-dev \
+        mingw-w64-tools \
+        pkg-config \
+        ripgrep
+      echo "::endgroup::"
+      x86_64-w64-mingw32-g++ --version | head -n 1

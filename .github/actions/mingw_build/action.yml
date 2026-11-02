@@ -1,0 +1,37 @@
+name: 'Build POV-Ray MinGW Console'
+description: 'Cross-build the Windows console (winconsole) via windows/mingw/build_console.sh'
+
+inputs:
+  configure-options:
+    description: 'Extra options after "--" for build_console.sh / configure'
+    required: false
+    default: ''
+  out-dir:
+    description: 'Build output directory (MINGW_OUT)'
+    required: false
+    default: 'build-mingw-ci'
+
+runs:
+  using: composite
+  steps:
+  - shell: bash
+    run: |
+      set -euo pipefail
+      export MINGW_OUT="${{ github.workspace }}/${{ inputs.out-dir }}"
+      export MINGW_HOST="${MINGW_HOST:-x86_64-w64-mingw32}"
+      export COMPILED_BY="${COMPILED_BY:-GitHub MinGW CI}"
+      # Smoke-test the MinGW Autotools + Windows VFE path. Keep zlib (required
+      # to link); Ubuntu has no MinGW PNG/JPEG/TIFF packages, so disable those.
+      export NON_REDISTRIBUTABLE_BUILD=yes
+      extra=(--without-libpng --without-libjpeg --without-libtiff --without-openexr)
+      user_extra=()
+      if [[ -n "${{ inputs.configure-options }}" ]]; then
+        # shellcheck disable=SC2206
+        user_extra=(${{ inputs.configure-options }})
+      fi
+      echo "::group::MinGW console cross-build"
+      ./windows/mingw/build_console.sh -- "${extra[@]}" ${user_extra[@]+"${user_extra[@]}"}
+      echo "::endgroup::"
+      test -f "$MINGW_OUT/povray.exe"
+      file "$MINGW_OUT/povray.exe"
+      ls -lh "$MINGW_OUT/povray.exe"
