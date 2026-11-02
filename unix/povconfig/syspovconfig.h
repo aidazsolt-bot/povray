@@ -273,6 +273,10 @@
     // Not officially supported yet; comment-out the following line to try with default POSIX settings.
     #error "Sun/Oracle Solaris detected, but not explicitly supported yet; proceed at your own risk."
     #include "syspovconfig_posix.h"
+#elif defined(__MINGW32__) || defined(__MINGW64__)
+    // MinGW-w64 (native MSYS/MinGW or Autotools --host=...-mingw32 cross).
+    // Experimental Unix-frontend Windows build; POSIX-ish settings.
+    #include "syspovconfig_posix.h"
 #elif defined(__CYGWIN__)
     // Cygwin detected.
     // Not officially supported yet; comment-out the following line to try with default POSIX settings.

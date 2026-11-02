@@ -62,7 +62,12 @@ int main (void)
               ax_check_lib="unknown"
               AC_MSG_RESULT([$ax_check_lib])
             ],
-            [AC_MSG_RESULT([cross-compiling, forced])]
+            [
+              # Cross builds cannot execute the version probe; accept the
+              # already-found library/headers and continue.
+              ax_check_lib="ok"
+              AC_MSG_RESULT([cross-compiling, forced])
+            ]
           )  # AC_RUN_IFELSE
         ],
         [ax_check_lib="no headers"]

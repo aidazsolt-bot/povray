@@ -66,7 +66,10 @@ int main (void)
               ax_check_libjpeg="unknown"
               AC_MSG_RESULT([$ax_check_libjpeg])
             ],
-            [AC_MSG_RESULT([cross-compiling, forced])]
+            [
+              ax_check_libjpeg="ok"
+              AC_MSG_RESULT([cross-compiling, forced])
+            ]
           )  # AC_RUN_IFELSE
         ],
         [ax_check_libjpeg="no headers"]

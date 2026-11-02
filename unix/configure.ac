@@ -522,10 +522,10 @@ AC_MSG_RESULT([
 Language constructs and functions
 ---------------------------------])
 
-# Compiling on the mingw32 platform (e.g. using MSYS) also requires
-# the -D__CYGWIN flag for tiff_pov.cpp
-case "$build" in
-  *mingw32*)  CPPFLAGS="$CPPFLAGS -D__CYGWIN";;
+# Compiling for/on mingw (MSYS native or Autotools --host cross) also
+# requires the -D__CYGWIN flag for tiff_pov.cpp.
+case "$host" in
+  *mingw*)  CPPFLAGS="$CPPFLAGS -D__CYGWIN";;
 esac
 
 

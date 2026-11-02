@@ -367,6 +367,14 @@ some of the POV-Ray developers may be available for contract work,
 depending on the circumstance. Please contact us for more information.
 
 
+MinGW-w64 (experimental Autotools cross)
+========================================
+
+An experimental Linux-to-Windows cross of the **Unix frontend** is documented
+under `windows/mingw/`. It wraps `./configure --host=x86_64-w64-mingw32` and
+`make` (see `unix/install.txt` §3.1.4). It does not build the POVWIN GUI.
+
+
 Thanks
 ======
 
