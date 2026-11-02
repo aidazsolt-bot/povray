@@ -97,7 +97,7 @@
 #define MACHINE_INTRINSICS_H                <x86intrin.h>
 
 // Same optimized-noise feature gates as recent MSVC builds. Individual TUs are
-// compiled with -mavx / -mavx2 -mfma / -mfma4 in windows/mingw/build_console.sh;
+// compiled with -mavx / -mavx2 -mfma / -mfma4 via platform/Makefile.am;
 // runtime dispatch via CPUID still selects a safe implementation.
 #define TRY_OPTIMIZED_NOISE
 #define TRY_OPTIMIZED_NOISE_AVX_PORTABLE
