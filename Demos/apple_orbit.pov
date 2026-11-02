@@ -21,6 +21,7 @@ background { color rgb 1.0 }
 
 gaussian_splat {
   "public/apple/splats/apple.ply"
+  backend vulkan
   sh_degree 3
   samples 2              // Kerbl EWA
   alpha_stop 0.999

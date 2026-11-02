@@ -15,4 +15,4 @@ light_source { <-12.3320, 16.6084, -13.8735> color rgb 1.3 }
 light_source { <8, 4, 6> color rgb 0.35 }
 background { color rgb <0.15, 0.2, 0.3> }
 
-assimp { "models/al.obj" }
+assimp { "Demos/models/al.obj" }
