@@ -518,7 +518,9 @@ bin_PROGRAMS = povray
 povray_SOURCES = \\
   \$(top_srcdir)/vfe/win/console/winconsole.cpp
 
-povray_CPPFLAGS = \$(AM_CPPFLAGS) -D_CONSOLE
+# Do not set povray_CPPFLAGS here: a per-target CPPFLAGS in any
+# conditional branch makes automake ignore AM_CPPFLAGS for all hosts
+# (Unix CI then fails to find vfe.h). -D_CONSOLE comes from configure.ac.
 povray_LDADD = \$(LDADD_COMMON) \$(POV_MINGW_CONSOLE_LIBS)
 
 AM_CPPFLAGS = \\
