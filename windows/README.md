@@ -367,12 +367,19 @@ some of the POV-Ray developers may be available for contract work,
 depending on the circumstance. Please contact us for more information.
 
 
-MinGW-w64 (experimental Autotools cross)
-========================================
+MinGW-w64 (experimental)
+========================
 
-An experimental Linux-to-Windows cross of the **Unix frontend** is documented
-under `windows/mingw/`. It wraps `./configure --host=x86_64-w64-mingw32` and
-`make` (see `unix/install.txt` §3.1.4). It does not build the POVWIN GUI.
+`windows/mingw/` has two experimental Linux-to-Windows paths:
+
+- **Windows VFE scrape** (`build_console.sh`): console `povray.exe` or POVWIN
+  GUI `pvengine64.exe` via `MINGW_FRONTEND=gui` (scrapes `windows/vs*` source
+  lists; vendored PNG/JPEG/TIFF/Zlib).
+- **Autotools Unix VFE** (`build_autotools_console.sh`):
+  `./configure --host=x86_64-w64-mingw32` + `make` (see `unix/install.txt`
+  §3.1.4). Does not build POVWIN.
+
+Prefer Visual Studio for the official Windows IDE.
 
 
 Thanks

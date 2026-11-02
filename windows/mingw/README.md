@@ -1,53 +1,71 @@
-# MinGW-w64 via GNU Autotools
+# MinGW-w64 Windows build (console + GUI)
 
-Cross-build the Unix frontend for Windows with the real repo `./configure`
-and `make`. Platform selection is Autotools **`--host`** (not `--target`).
+Cross-build of the Windows POV-Ray front-ends by scraping `windows/vs2015`
+(or `vs2022`) source lists:
 
-This does **not** build POVWIN (`pvengine`). Prefer Visual Studio for the
-Windows IDE. See `unix/install.txt` §3.1.4 (cross-compile is BETA).
+- console (`vfe/win/console`) -> `povray.exe`
+- POVWIN GUI (`windows/pv*.cpp`) -> `pvengine64.exe`
+
+This is separate from the experimental Autotools Unix-VFE path
+(`build_autotools_console.sh` / `./configure --host=...`). Prefer Visual
+Studio for official Windows IDE builds; see `windows/README.md`.
+
+## Requirements
+
+- `x86_64-w64-mingw32-g++` / `gcc` / `windres`
+- Bash, `rg`, `realpath`, `md5sum`, `python3`
+- Optional: Wine to run the resulting `.exe` on Linux
+
+On Fedora/RHEL-style hosts:
+
+```bash
+dnf install mingw64-gcc-c++
+```
 
 ## Build
 
+From the repository root:
+
 ```bash
+# Console (default) -> ./build-mingw/povray.exe
 ./windows/mingw/build_console.sh
+
+# POVWIN GUI -> ./build-mingw/pvengine64.exe
+MINGW_FRONTEND=gui ./windows/mingw/build_console.sh
 ```
 
-Or manually:
+Override output directory or toolchain:
 
 ```bash
-cd unix && ./prebuild.sh
-cd ..
-mkdir -p build-mingw && cd build-mingw
-../configure --host=x86_64-w64-mingw32 \
-  COMPILED_BY="your name <email>" \
-  --prefix="$PWD/install"
-make -j"$(nproc)"
-```
-
-Extra configure flags:
-
-```bash
-./windows/mingw/build_console.sh -- --disable-shared
+MINGW_OUT=$HOME/tmp/mingw_pov CXX=x86_64-w64-mingw32-g++ \
+  MINGW_FRONTEND=gui ./windows/mingw/build_console.sh
 ```
 
 | Variable | Default |
 |---|---|
-| `MINGW_HOST` | `x86_64-w64-mingw32` |
+| `MINGW_FRONTEND` | `console` (`gui` for POVWIN) |
 | `MINGW_OUT` | `<repo>/build-mingw` |
-| `COMPILED_BY` | `MinGW-w64 cross <povray.git>` |
-| `CC` / `CXX` | `${MINGW_HOST}-gcc` / `g++` |
+| `CC` / `CXX` / `WINDRES` | `x86_64-w64-mingw32-{gcc,g++,windres}` |
 | `JOBS` | `nproc` |
+| `SHIPPED_DLL` | `<repo>/shipped_dll` (optional editor DLLs) |
 
-Needs MinGW-w64 toolchain plus target libs in the sysroot (`mingw64-zlib`,
-and preferably PNG/JPEG/TIFF). Missing optional image libs fall back to
-`NON_REDISTRIBUTABLE_BUILD=yes`.
+PNG/JPEG/Zlib/TIFF come from vendored `libraries/*` (static). OpenEXR is
+off (`OPENEXR_MISSING`). The exe links with `-static-libgcc -static-libstdc++`
+and static `libwinpthread`.
 
-## Branch fixes (minimal)
+Optional editor DLLs (`cmedit64.dll`, `povcmax64.dll`) are copied from
+`shipped_dll/` when present; POVWIN runs without them.
 
-- `AX_CHECK_LIB*` accepts found libs when cross-compiling (upstream left the
-  result unset on that path).
-- `unix/povconfig/syspovconfig.h` recognizes `__MINGW32__` / `__MINGW64__`.
-- `unix/configure.ac` applies the MinGW TIFF workaround from `$host`.
+## Config headers
 
-`make` may still fail in `vfe/unix/` (POSIX console APIs). That is frontend
-porting work, not another build system.
+- `windows/povconfig/syspovconfig.h` - MinGW branch enabled
+- `windows/povconfig/syspovconfig_mingw32.h` - MinGW-w64 CRT/config
+
+## Autotools Unix-VFE (alternative)
+
+```bash
+./windows/mingw/build_autotools_console.sh
+```
+
+That path builds the Unix frontend under `--host=x86_64-w64-mingw32` and
+does **not** produce POVWIN.

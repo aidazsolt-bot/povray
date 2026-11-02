@@ -42,11 +42,13 @@
 #define POVRAY_WINDOWS_SYSPOVCONFIG_H
 
 #ifdef BUILDING_AMD64
-  #if !defined(_M_AMD64) && !defined(_M_X64)
+  #if !defined(_M_AMD64) && !defined(_M_X64) && !defined(__x86_64__) && !defined(__amd64__)
     #error "you are compiling the x64 project using a 32-bit compiler"
   #endif
 #else
-  #if defined(_M_AMD64) || defined(_M_X64)
+  // MSVC uses separate 32/64 project configs via BUILDING_AMD64.
+  // MinGW-w64 follows the compiler's native arch (__x86_64__/__i386__) instead.
+  #if !defined(__MINGW32__) && (defined(_M_AMD64) || defined(_M_X64))
     #error "you are compiling the 32-bit project using a 64-bit compiler"
   #endif
 #endif
@@ -77,9 +79,18 @@
 
 #define ReturnAddress()           NULL
 
-#if defined(__MINGW32__)                    /* MinGW GCC */
-  #error "Currently not supported."
+#if defined(__MINGW32__)                    /* MinGW / MinGW-w64 GCC */
   #include "syspovconfig_mingw32.h"
+  // Match historic Windows config convenience typedefs used throughout the tree.
+  #ifndef STD_TYPES_DECLARED
+  #define STD_TYPES_DECLARED
+  #include <string>
+  #include <vector>
+  #include <list>
+  using std::string;
+  using std::vector;
+  using std::list;
+  #endif
 #elif defined(__WATCOMC__)                  /* Watcom C/C++ C32 */
   #error "Currently not supported."
   #include "syspovconfig_watcom.h"
@@ -228,8 +239,14 @@ namespace pov
 
 #define HAVE_NAN
 #define HAVE_INF
-#define POV_ISNAN(x)    (_isnan(x) != 0)
-#define POV_ISFINITE(x) (_finite(x) != 0)
+#if defined(__MINGW32__)
+  // MinGW-w64 provides C99/C++11 classification in <cmath>; MSVC uses _isnan/_finite.
+  #define POV_ISNAN(x)    (std::isnan(x) != 0)
+  #define POV_ISFINITE(x) (std::isfinite(x) != 0)
+#else
+  #define POV_ISNAN(x)    (_isnan(x) != 0)
+  #define POV_ISFINITE(x) (_finite(x) != 0)
+#endif
 #define POV_ISINF(x)    (!POV_ISFINITE(x) && !POV_ISNAN(x))
 
 #endif // POVRAY_WINDOWS_SYSPOVCONFIG_H
