@@ -43,5 +43,6 @@ copied from `shipped_dll/` into the output directory when present.
 | `COMPILED_BY` | `MinGW-w64 cross <povray.git>` |
 | `SHIPPED_DLL` | `<repo>/shipped_dll` |
 
-Needs MinGW-w64 plus target image libs in the sysroot (`zlib`, `libpng`,
-`jpeg`, `tiff`). See `libraries/build-mingw-sysroot-image-libs.sh`.
+Needs MinGW-w64 plus target image libs in the compiler sysroot (`zlib`,
+`libpng`, `jpeg`, `tiff`). Configure finds them without `--with-*=DIR`.
+See `libraries/build-mingw-sysroot-image-libs.sh`.

@@ -16,9 +16,6 @@ JOBS="${JOBS:-$(nproc)}"
 COMPILED_BY="${COMPILED_BY:-MinGW-w64 cross <povray.git>}"
 CXX="${CXX:-${HOST}-g++}"
 CC="${CC:-${HOST}-gcc}"
-SYSROOT="${MINGW_SYSROOT:-$("$CXX" -print-sysroot 2>/dev/null)/mingw}"
-SYSROOT="${SYSROOT%/}"
-
 # MINGW_GUI=true|yes|1 enables --enable-mingw-gui unless already in PASSTHRU.
 MINGW_GUI_ENV="${MINGW_GUI:-false}"
 
@@ -82,41 +79,9 @@ case "${MINGW_GUI_ENV,,}" in
     ;;
 esac
 
-append_with_or_without() {
-  local opt="$1" libfile="$2"
-  local a
-  for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
-    case "$a" in
-      --with-${opt}|--with-${opt}=*|--without-${opt}) return 0 ;;
-    esac
-  done
-  if [[ -n "$SYSROOT" && -e "$SYSROOT/lib/$libfile" ]]; then
-    CONFIGURE_ARGS+=("--with-${opt}=$SYSROOT/lib")
-  else
-    CONFIGURE_ARGS+=("--without-${opt}")
-    NEED_NON_REDIST=1
-  fi
-}
-
-NEED_NON_REDIST=0
-append_with_or_without zlib libz.dll.a
-# Static .a is enough when only libpng.a exists; prefer import lib if present.
-if [[ -e "$SYSROOT/lib/libpng.dll.a" ]]; then
-  append_with_or_without libpng libpng.dll.a
-elif [[ -e "$SYSROOT/lib/libpng.a" ]]; then
-  append_with_or_without libpng libpng.a
-else
-  append_with_or_without libpng libpng.dll.a
-fi
-if [[ -e "$SYSROOT/lib/libjpeg.dll.a" || -e "$SYSROOT/lib/libjpeg.a" ]]; then
-  append_with_or_without libjpeg libjpeg.dll.a
-elif [[ -e "$SYSROOT/lib/libjpeg-62.dll.a" ]]; then
-  append_with_or_without libjpeg libjpeg-62.dll.a
-else
-  append_with_or_without libjpeg libjpeg.dll.a
-fi
-append_with_or_without libtiff libtiff.dll.a
-
+# Image libs (zlib/png/jpeg/tiff): do not pass --with-*=DIR; the MinGW
+# cross compiler should find them in its default sysroot. Optional overrides
+# remain available via PASSTHRU. SDL/OpenEXR stay off unless requested.
 have_passthru_sdl=0
 have_passthru_exr=0
 for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
@@ -127,15 +92,6 @@ for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
 done
 (( have_passthru_sdl )) || CONFIGURE_ARGS+=(--without-libsdl)
 (( have_passthru_exr )) || CONFIGURE_ARGS+=(--without-openexr)
-
-if (( NEED_NON_REDIST )); then
-  already=0
-  for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
-    case "$a" in NON_REDISTRIBUTABLE_BUILD=*) already=1 ;; esac
-  done
-  (( already )) || CONFIGURE_ARGS+=("NON_REDISTRIBUTABLE_BUILD=yes")
-  echo "NOTE: some image libs missing in $SYSROOT - using NON_REDISTRIBUTABLE_BUILD" >&2
-fi
 
 echo "Configuring: --host=$HOST  out=$OUT"
 "$ROOT/configure" "${CONFIGURE_ARGS[@]}" "${PASSTHRU[@]+"${PASSTHRU[@]}"}"
