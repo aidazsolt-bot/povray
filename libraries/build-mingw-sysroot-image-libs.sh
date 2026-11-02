@@ -1,23 +1,26 @@
 #!/bin/bash
-# Cross-build vendored zlib / libjpeg / libpng / libtiff for MinGW-w64 and
-# install static + shared artifacts into the MinGW sysroot.
+# Cross-build vendored zlib / libjpeg / libpng / libtiff / OpenEXR for MinGW-w64
+# and install static + shared artifacts into the MinGW sysroot.
 #
 # Uses each library's native build system:
-#   zlib  -> win32/Makefile.gcc (MinGW makefile)
-#   jpeg  -> GNU Autotools ./configure
-#   png   -> scripts/makefile.msys (zip tree; ./configure is a stub)
-#   tiff  -> GNU Autotools ./configure
+#   zlib    -> win32/Makefile.gcc (MinGW makefile)
+#   jpeg    -> GNU Autotools ./configure
+#   png     -> scripts/makefile.msys (zip tree; ./configure is a stub)
+#   tiff    -> GNU Autotools ./configure
+#   openexr -> GNU Autotools (vendored IlmBase 2.2 + OpenEXR 2.2 subsets;
+#              staged copies are patched - tests/tools stripped for cross)
 #
 # Intended to be run as root (sysroot is root-owned on RPM hosts):
 #
 #   sudo ./libraries/build-mingw-sysroot-image-libs.sh
+#   sudo PACKAGES="openexr" ./libraries/build-mingw-sysroot-image-libs.sh
 #
 # Optional env:
 #   HOST       default x86_64-w64-mingw32
 #   PREFIX     default $($HOST-gcc -print-sysroot)/mingw
 #   BUILD_ROOT default /var/tmp/povray-mingw-image-libs
 #   JOBS       default nproc
-#   PACKAGES   default "zlib jpeg png tiff" (subset ok; deps still enforced)
+#   PACKAGES   default "zlib jpeg png tiff openexr" (subset ok; deps enforced)
 #
 # Does not modify the git working tree: sources are copied into BUILD_ROOT.
 set -euo pipefail
@@ -41,7 +44,7 @@ if [[ -z "${PREFIX:-}" ]]; then
   PREFIX="${SYSROOT%/}/mingw"
 fi
 
-PACKAGES=(${PACKAGES:-zlib jpeg png tiff})
+PACKAGES=(${PACKAGES:-zlib jpeg png tiff openexr})
 
 log() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -51,6 +54,7 @@ need_cmd() {
 }
 
 need_cmd "$CC"
+need_cmd "$CXX"
 need_cmd "$AR"
 need_cmd make
 need_cmd rsync
@@ -103,6 +107,8 @@ stage_src() {
     --exclude '.git/' \
     --exclude 'autom4te.cache/' \
     "$src/" "$dst/"
+  # Working tree may have lost +x on configure (ACL cleanup); ensure runnable.
+  [[ -f "$dst/configure" ]] && chmod +x "$dst/configure" "$dst/config.guess" "$dst/config.sub" "$dst/install-sh" 2>/dev/null || true
 }
 
 # --- zlib (native MinGW makefile) -------------------------------------------
@@ -273,13 +279,332 @@ build_tiff() {
   log "OK tiff -> $PREFIX"
 }
 
+# --- IlmBase + OpenEXR 2.2 (vendored subsets; Autotools) --------------------
+# POV ships incomplete trees (no *Test / IexMath / IlmImfUtil / tools / doc).
+# Stage copies, patch shipped Makefile.in + configure (no autoreconf), skip
+# host table generators (eLut.h / b44ExpLogTable.h / dwaLookups.h are present).
+
+# Replace a (possibly multi-line) SUBDIRS = ... assignment in Makefile.am/.in.
+_patch_automake_subdirs() {
+  local makefile="$1"
+  local subdirs="$2"
+  [[ -f "$makefile" ]] || return 0
+  python3 - "$makefile" "$subdirs" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+subdirs = sys.argv[2]
+text = path.read_text()
+repl = "SUBDIRS = " + subdirs + "\n"
+new, n = re.subn(
+    r"^SUBDIRS\s*=\s*(?:\\\n|.)*?(?=\n[A-Za-z_]|\n\n|\Z)",
+    repl,
+    text,
+    count=1,
+    flags=re.M,
+)
+if n != 1:
+    sys.exit(f"SUBDIRS patch failed in {path}")
+path.write_text(new)
+PY
+}
+
+# Trim ac_config_files in the shipped configure script to paths that exist.
+_patch_configure_config_files() {
+  local srcdir="$1"
+  local configure="$srcdir/configure"
+  [[ -f "$configure" ]] || die "missing $configure"
+  python3 - "$srcdir" "$configure" <<'PY'
+import pathlib, re, sys
+srcdir = pathlib.Path(sys.argv[1])
+configure = pathlib.Path(sys.argv[2])
+text = configure.read_text()
+m = re.search(r'^ac_config_files="\$ac_config_files ([^"]*)"', text, re.M)
+if not m:
+    sys.exit(f"ac_config_files assignment not found in {configure}")
+keep = []
+for item in m.group(1).split():
+    # IlmBase.pc / OpenEXR.pc come from *.pc.in at srcdir root.
+    if item.endswith(".pc"):
+        cand = srcdir / (item + ".in")
+    else:
+        cand = srcdir / (item + ".in")
+    if cand.is_file():
+        keep.append(item)
+    else:
+        print(f"NOTE: drop missing config file {item} (no {cand.name})", flush=True)
+if not keep:
+    sys.exit("no ac_config_files entries remain")
+repl = 'ac_config_files="$ac_config_files ' + " ".join(keep) + '"'
+text2 = text[: m.start()] + repl + text[m.end() :]
+# Also drop case arms for removed Makefile outputs (harmless if left, but tidy).
+for item in m.group(1).split():
+    if item in keep:
+        continue
+    text2 = re.sub(
+        rf'\n    "{re.escape(item)}"\) CONFIG_FILES="\$CONFIG_FILES {re.escape(item)}" ;;',
+        "",
+        text2,
+    )
+configure.write_text(text2)
+PY
+}
+
+_disable_host_table_tools() {
+  local am="$1"
+  [[ -f "$am" ]] || return 0
+  sed -i \
+    -e 's/^noinst_PROGRAMS =.*/noinst_PROGRAMS =/' \
+    -e 's/^BUILT_SOURCES =.*/BUILT_SOURCES =/' \
+    -e 's/^CLEANFILES =.*/CLEANFILES =/' \
+    "$am"
+  local inn="${am%.am}.in"
+  if [[ -f "$inn" ]]; then
+    sed -i \
+      -e 's/^noinst_PROGRAMS =.*/noinst_PROGRAMS =/' \
+      -e 's/^BUILT_SOURCES =.*/BUILT_SOURCES =/' \
+      -e 's/^CLEANFILES =.*/CLEANFILES =/' \
+      "$inn"
+  fi
+}
+
+# Headers pick Win32 types under _WIN32; Autotools only lists Posix .cpp.
+# Mirror CMake WIN32: compile IlmThread*Win32.cpp and leave HAVE_PTHREAD unset
+# (--disable-threading) so the Posix translation units stay empty.
+_use_ilmthread_win32() {
+  local am="$1/IlmThread/Makefile.am"
+  local inn="$1/IlmThread/Makefile.in"
+  python3 - "$am" "$inn" <<'PY'
+import pathlib, re, sys
+
+def patch(path: pathlib.Path) -> None:
+    text = path.read_text()
+    # Only treat Win32 as present if it is inside libIlmThread_la_SOURCES
+    # (EXTRA_DIST also lists those files).
+    src_m = re.search(
+        r"^libIlmThread_la_SOURCES =(?:\\\n|.)*?IlmThreadMutexPosix\.cpp",
+        text,
+        re.M,
+    )
+    if not src_m:
+        sys.exit(f"IlmThread SOURCES block not found in {path}")
+    if "IlmThreadWin32.cpp" in src_m.group(0):
+        return
+    new = text[: src_m.end()] + (
+        " IlmThreadWin32.cpp IlmThreadMutexWin32.cpp "
+        "IlmThreadSemaphoreWin32.cpp"
+    ) + text[src_m.end() :]
+    # Makefile.in also hardcodes am_*_OBJECTS; keep them in sync.
+    new2, n2 = re.subn(
+        r"(^am_libIlmThread_la_OBJECTS =(?:(?:\\\n|.)*?IlmThreadMutexPosix\.lo))",
+        r"\1 IlmThreadWin32.lo IlmThreadMutexWin32.lo IlmThreadSemaphoreWin32.lo",
+        new,
+        count=1,
+        flags=re.M,
+    )
+    if "am_libIlmThread_la_OBJECTS" in text and n2 != 1:
+        sys.exit(f"IlmThread Win32 OBJECTS patch failed in {path}")
+    path.write_text(new2 if n2 else new)
+
+for path_s in sys.argv[1:]:
+    path = pathlib.Path(path_s)
+    if path.is_file():
+        patch(path)
+PY
+}
+
+build_ilmbase() {
+  log "==> ilmbase (configure --host, static+shared)"
+  stage_src ilmbase
+  local src="$BUILD_ROOT/src/ilmbase"
+  local bld="$BUILD_ROOT/build/ilmbase"
+  # Satisfy AC_CONFIG_SRCDIR without shipping the omitted test tree.
+  mkdir -p "$src/ImathTest"
+  printf 'int main(void){return 0;}\n' >"$src/ImathTest/main.cpp"
+  _patch_automake_subdirs "$src/Makefile.am" "Half Iex Imath IlmThread config"
+  _patch_automake_subdirs "$src/Makefile.in" "Half Iex Imath IlmThread config"
+  _patch_configure_config_files "$src"
+  _disable_host_table_tools "$src/Half/Makefile.am"
+  _use_ilmthread_win32 "$src"
+  rm -rf "$bld"
+  mkdir -p "$bld"
+  (
+    cd "$bld"
+    export lt_cv_deplibs_check_method=pass_all
+    "$src/configure" \
+      --host="$HOST" \
+      --build="$(gcc -dumpmachine)" \
+      --prefix="$PREFIX" \
+      --enable-shared \
+      --enable-static \
+      --disable-dependency-tracking \
+      --disable-threading \
+      CC="$CC" \
+      CXX="$CXX" \
+      AR="$AR" \
+      RANLIB="$RANLIB" \
+      STRIP="$STRIP" \
+      CPPFLAGS="$CPPFLAGS" \
+      LDFLAGS="$LDFLAGS" \
+      CXXFLAGS="-O2 -std=c++14"
+    # Belt-and-suspenders: drop table-tool targets if configure regenerated them.
+    if [[ -f Half/Makefile ]]; then
+      sed -i \
+        -e 's/^noinst_PROGRAMS =.*/noinst_PROGRAMS =/' \
+        -e 's/^BUILT_SOURCES =.*/BUILT_SOURCES =/' \
+        Half/Makefile
+    fi
+    make -j"$JOBS"
+    make install
+  )
+  # Vendored tree omits IexMath; drop it from the installed .pc.
+  if [[ -f "$PREFIX/lib/pkgconfig/IlmBase.pc" ]]; then
+    sed -i 's/ -lIexMath//g' "$PREFIX/lib/pkgconfig/IlmBase.pc"
+  fi
+  log "OK ilmbase -> $PREFIX (Half/Iex/Imath/IlmThread)"
+}
+
+# MinGW is __GNUC__ but has no posix_memalign; use Win32 aligned malloc.
+# Also fix pointer-alignment check that casts to unsigned long (LP64 Win64).
+_patch_openexr_mingw_headers() {
+  local sys="$1/IlmImf/ImfSystemSpecific.h"
+  local pix="$1/IlmImf/ImfOptimizedPixelReading.h"
+  [[ -f "$sys" ]] || die "missing $sys"
+  python3 - "$sys" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+old = """static void* EXRAllocAligned(size_t size, size_t alignment)
+{
+    void* ptr = 0;
+    posix_memalign(&ptr, alignment, size);
+    return ptr;
+}
+
+
+static void EXRFreeAligned(void* ptr)
+{
+    free(ptr);
+}"""
+new = """static void* EXRAllocAligned(size_t size, size_t alignment)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    return _aligned_malloc(size, alignment);
+#else
+    void* ptr = 0;
+    posix_memalign(&ptr, alignment, size);
+    return ptr;
+#endif
+}
+
+
+static void EXRFreeAligned(void* ptr)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    _aligned_free(ptr);
+#else
+    free(ptr);
+#endif
+}"""
+if old not in text:
+    if "_aligned_malloc" in text and "posix_memalign" in text:
+        pass  # already patched
+    else:
+        sys.exit(f"EXRAllocAligned block not found in {path}")
+else:
+    path.write_text(text.replace(old, new, 1))
+PY
+  if [[ -f "$pix" ]]; then
+    sed -i \
+      -e 's/((unsigned long)pPointer)/((uintptr_t)pPointer)/' \
+      -e 's/unsigned long trailingBits/uintptr_t trailingBits/' \
+      "$pix"
+    if ! grep -q '#include <stdint.h>' "$pix"; then
+      sed -i '1a #include <stdint.h>' "$pix"
+    fi
+  fi
+}
+
+build_openexr() {
+  log "==> openexr (configure --host, static+shared; needs ilmbase + zlib)"
+  # IlmBase installs headers into include/OpenEXR/
+  [[ -d "$PREFIX/include/OpenEXR" ]] || die "missing $PREFIX/include/OpenEXR after ilmbase"
+  [[ -f "$PREFIX/include/zlib.h" ]] || die "openexr needs zlib in $PREFIX"
+  stage_src openexr
+  local src="$BUILD_ROOT/src/openexr"
+  local bld="$BUILD_ROOT/build/openexr"
+  mkdir -p "$src/IlmImfTest"
+  printf 'int main(void){return 0;}\n' >"$src/IlmImfTest/main.cpp"
+  _patch_automake_subdirs "$src/Makefile.am" "config IlmImf"
+  _patch_automake_subdirs "$src/Makefile.in" "config IlmImf"
+  _patch_configure_config_files "$src"
+  _disable_host_table_tools "$src/IlmImf/Makefile.am"
+  _patch_openexr_mingw_headers "$src"
+  rm -rf "$bld"
+  mkdir -p "$bld"
+  (
+    cd "$bld"
+    export lt_cv_deplibs_check_method=pass_all
+    export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+    export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+    "$src/configure" \
+      --host="$HOST" \
+      --build="$(gcc -dumpmachine)" \
+      --prefix="$PREFIX" \
+      --enable-shared \
+      --enable-static \
+      --disable-dependency-tracking \
+      --disable-imfexamples \
+      --disable-imffuzztest \
+      --disable-imfhugetest \
+      --with-ilmbase-prefix="$PREFIX" \
+      CC="$CC" \
+      CXX="$CXX" \
+      AR="$AR" \
+      RANLIB="$RANLIB" \
+      STRIP="$STRIP" \
+      CPPFLAGS="-I$PREFIX/include -I$PREFIX/include/OpenEXR" \
+      LDFLAGS="-L$PREFIX/lib" \
+      CXXFLAGS="-O2 -std=c++14" \
+      PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" \
+      PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+    if [[ -f IlmImf/Makefile ]]; then
+      sed -i \
+        -e 's/^noinst_PROGRAMS =.*/noinst_PROGRAMS =/' \
+        -e 's/^BUILT_SOURCES =.*/BUILT_SOURCES =/' \
+        IlmImf/Makefile
+    fi
+    make -j"$JOBS"
+    make install
+  )
+  # Ensure runtime DLLs land in bin/ for Windows PATH next to povray.exe.
+  mkdir -p "$PREFIX/bin"
+  shopt -s nullglob
+  for dll in "$PREFIX/bin"/libIlmImf*.dll "$PREFIX/lib"/libIlmImf*.dll \
+             "$PREFIX/bin"/libHalf*.dll "$PREFIX/lib"/libHalf*.dll \
+             "$PREFIX/bin"/libIex*.dll "$PREFIX/lib"/libIex*.dll \
+             "$PREFIX/bin"/libImath*.dll "$PREFIX/lib"/libImath*.dll \
+             "$PREFIX/bin"/libIlmThread*.dll "$PREFIX/lib"/libIlmThread*.dll; do
+    cp -f "$dll" "$PREFIX/bin/" 2>/dev/null || true
+  done
+  shopt -u nullglob
+  log "OK openexr -> $PREFIX (IlmImf + OpenEXR.pc)"
+}
+
 # Dependency order regardless of PACKAGES listing.
 if want zlib; then build_zlib; fi
 if want jpeg; then build_jpeg; fi
 if want png; then build_png; fi
 if want tiff; then build_tiff; fi
+# openexr implies ilmbase (and needs zlib already in PREFIX).
+if want openexr; then
+  build_ilmbase
+  build_openexr
+fi
 
 log "DONE. Installed under $PREFIX"
 log "Check:"
 ls -l "$PREFIX/lib"/libz.* "$PREFIX/lib"/libpng* "$PREFIX/lib"/libjpeg* "$PREFIX/lib"/libtiff* 2>/dev/null || true
+ls -l "$PREFIX/lib"/libIlmImf* "$PREFIX/lib"/libHalf* "$PREFIX/lib"/libImath* 2>/dev/null || true
+ls -l "$PREFIX/lib/pkgconfig"/OpenEXR.pc "$PREFIX/lib/pkgconfig"/IlmBase.pc 2>/dev/null || true
 ls -l "$PREFIX/bin"/zlib1.dll "$PREFIX/bin"/libpng*.dll "$PREFIX/bin"/libjpeg*.dll "$PREFIX/bin"/libtiff*.dll 2>/dev/null || true
+ls -l "$PREFIX/bin"/libIlmImf*.dll "$PREFIX/bin"/libHalf*.dll 2>/dev/null || true
