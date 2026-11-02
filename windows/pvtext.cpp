@@ -1660,10 +1660,11 @@ HWND create_toolbar (HWND hwndParent)
   if (hwnd == NULL)
     return (NULL) ;
   SendMessage (hwnd, TB_BUTTONSTRUCTSIZE, sizeof (TBBUTTON), 0) ;
-  SendMessage (hwnd, TB_SETBITMAPSIZE, 0, (LPARAM) MAKELONG (38, 21)) ;
-  SendMessage (hwnd, TB_SETBUTTONSIZE, 0, (LPARAM) MAKELONG (38, 21)) ;
+  // Toolbar BMPs in windows/bitmaps/toolbar are 38x38 (not 38x21).
+  SendMessage (hwnd, TB_SETBITMAPSIZE, 0, (LPARAM) MAKELONG (38, 38)) ;
+  SendMessage (hwnd, TB_SETBUTTONSIZE, 0, (LPARAM) MAKELONG (38, 38)) ;
 
-  if ((ToolImages1 = ImageList_Create (38, 21, (screen_depth < 8 ? ILC_COLOR4 : ILC_COLOR24) | ILC_MASK, 0, 16)) == NULL)
+  if ((ToolImages1 = ImageList_Create (38, 38, (screen_depth < 8 ? ILC_COLOR4 : ILC_COLOR24) | ILC_MASK, 0, 16)) == NULL)
     return (NULL) ;
   for (dt = main_tbb, st = maintools ; st->text != NULL ; st++, dt++)
   {

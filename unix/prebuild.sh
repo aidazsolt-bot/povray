@@ -486,9 +486,13 @@ pvengine_LDFLAGS = \$(POV_MINGW_GUI_LDFLAGS)
 pvengine_LDADD = \$(LDADD_COMMON) \$(POV_MINGW_GUI_LIBS) pvengine-rc.\$(OBJEXT)
 pvengine_DEPENDENCIES = \$(LDADD_COMMON) pvengine-rc.\$(OBJEXT)
 
-pvengine-rc.\$(OBJEXT): \$(top_srcdir)/windows/pvengine.rc \$(top_srcdir)/windows/mingw/fix_rc_paths.py
+# MSVC embeds pvengine64.manifest via AdditionalManifestFiles; windres needs
+# it appended to the RC so ComCtl6 (rebar/toolbar icons) activates on Windows.
+pvengine-rc.\$(OBJEXT): \$(top_srcdir)/windows/pvengine.rc \$(top_srcdir)/windows/mingw/fix_rc_paths.py \\
+		\$(top_srcdir)/windows/pvengine64.manifest
 	python3 \$(top_srcdir)/windows/mingw/fix_rc_paths.py \\
 	  \$(top_srcdir)/windows \$(builddir)/pvengine_mingw.rc
+	echo \"1 RT_MANIFEST \\\\\"\$(top_srcdir)/windows/pvengine64.manifest\\\\\"\" >> \$(builddir)/pvengine_mingw.rc
 	\$(WINDRES) -I\$(top_srcdir)/windows -I\$(top_srcdir)/windows/povconfig \\
 	  -DNDEBUG -o \$@ \$(builddir)/pvengine_mingw.rc
 
