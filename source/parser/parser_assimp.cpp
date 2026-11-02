@@ -184,6 +184,10 @@ struct AssimpMapRef
     bool Ok() const { return embedded != nullptr || !path.empty(); }
 };
 
+AssimpMapRef TryGetAssimpTexture(Parser *parser, const aiScene *scene, const aiMaterial *mat,
+                                 const std::string &modelDir, aiTextureType type, const char *label,
+                                 bool &usedImageMap);
+
 /// Resolve Assimp texture filename to an on-disk path (model dir + extension fallbacks).
 std::string ResolveAssimpTextureFile(Parser *parser, const std::string &modelDir, const char *texPath)
 {
@@ -409,6 +413,169 @@ TEXTURE *MakeImageMappedTexture(Parser *parser, const AssimpMapRef &ref, DBL amb
     return tex;
 }
 
+/// Map glTF metallic-roughness scalars onto POV finish (no per-texel MR maps yet).
+/// POV stores Specular Roughness as 1/scene_roughness (see Create_Finish / ROUGHNESS_TOKEN).
+void ApplyAssimpPbrFinish(Parser *parser, TEXTURE *tex, const aiMaterial *mat,
+                          const aiScene *scene, const std::string &modelDir, bool &usedImageMap)
+{
+    if (tex == nullptr || tex->Finish == nullptr || mat == nullptr)
+        return;
+
+    float metallic = -1.0f;
+    float roughness = -1.0f;
+    const bool haveMetallic = (mat->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS);
+    const bool haveRoughness = (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS);
+    if (!haveMetallic && !haveRoughness)
+        return;
+
+    if (!haveMetallic)
+        metallic = 0.0f;
+    if (!haveRoughness)
+        roughness = 1.0f;
+    metallic = static_cast<float>(Clamp01(metallic));
+    roughness = static_cast<float>(Clamp01(roughness));
+
+    // Warn when packed / separate MR maps exist - scalars only for now.
+    bool mapFlag = false;
+    AssimpMapRef mr = TryGetAssimpTexture(parser, scene, mat, modelDir,
+                                          aiTextureType_UNKNOWN, "metallic_roughness", mapFlag);
+    if (!mr.Ok())
+        mr = TryGetAssimpTexture(parser, scene, mat, modelDir,
+                                 aiTextureType_METALNESS, "metalness", mapFlag);
+    if (!mr.Ok())
+        mr = TryGetAssimpTexture(parser, scene, mat, modelDir,
+                                 aiTextureType_DIFFUSE_ROUGHNESS, "roughness", mapFlag);
+    if (mr.Ok())
+        parser->Warning("Assimp MR map '%s' present; using metallic/roughness factors only (per-texel MR not wired).",
+                        mr.label.c_str());
+    usedImageMap = usedImageMap || mapFlag;
+
+    const DBL m = metallic;
+    const DBL r = roughness;
+    // Dielectric F0 ~0.04; metals reflect strongly but lose sharp mirror as roughness rises.
+    const DBL gloss = Clamp01(1.0 - r);
+    const DBL refl = Clamp01((0.04 * (1.0 - m) + 0.72 * m) * (0.15 + 0.85 * gloss * gloss));
+    const DBL diffuse = Clamp01(0.72 * (1.0 - 0.85 * m));
+    const DBL specular = Clamp01((0.08 + 0.55 * m) * (0.2 + 0.8 * gloss));
+    // Scene-file roughness (tight highlights when glossy); stored as reciprocal.
+    const DBL sceneRough = 0.02 + r * r * 0.45;
+    const DBL storedRough = 1.0 / std::max(sceneRough, 0.001);
+
+    tex->Finish->Diffuse = static_cast<SNGL>(diffuse);
+    tex->Finish->Specular = static_cast<SNGL>(specular);
+    tex->Finish->Roughness = static_cast<SNGL>(storedRough);
+    tex->Finish->Metallic = static_cast<SNGL>(m);
+    tex->Finish->Reflection_Max = MathColour(refl);
+    tex->Finish->Reflection_Min = MathColour(refl);
+    tex->Finish->Reflection_Falloff = 1.0f;
+    tex->Finish->Reflect_Metallic = static_cast<SNGL>(m);
+    tex->Finish->Conserve_Energy = true;
+
+    parser->Warning("Assimp PBR finish approx metallic=%.3f roughness=%.3f -> diffuse=%.3f specular=%.3f reflection=%.3f.",
+                    m, r, diffuse, specular, refl);
+}
+
+/// Mean RGB of bright texels in an Assimp image (emissive maps are mostly black).
+/// Falls back to luminance-weighted mean if nothing passes the threshold.
+bool MeanRgbFromAssimpImage(ImageData *image, DBL &outR, DBL &outG, DBL &outB)
+{
+    outR = outG = outB = 0.0;
+    if (image == nullptr || image->data == nullptr)
+        return false;
+    const unsigned w = image->data->GetWidth();
+    const unsigned h = image->data->GetHeight();
+    if (w == 0 || h == 0)
+        return false;
+    const unsigned step = std::max(1u, std::max(w, h) / 64u);
+    double brightR = 0.0, brightG = 0.0, brightB = 0.0;
+    double wR = 0.0, wG = 0.0, wB = 0.0, wSum = 0.0;
+    unsigned brightN = 0;
+    const double kBright = 0.05;
+    for (unsigned y = 0; y < h; y += step)
+    {
+        for (unsigned x = 0; x < w; x += step)
+        {
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            image->data->GetRGBValue(x, y, r, g, b);
+            const double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            const double wt = lum * lum;
+            wR += r * wt;
+            wG += g * wt;
+            wB += b * wt;
+            wSum += wt;
+            if (std::max(r, std::max(g, b)) >= kBright)
+            {
+                brightR += r;
+                brightG += g;
+                brightB += b;
+                ++brightN;
+            }
+        }
+    }
+    if (brightN > 0)
+    {
+        outR = brightR / brightN;
+        outG = brightG / brightN;
+        outB = brightB / brightN;
+        return true;
+    }
+    if (wSum <= 1.0e-12)
+        return false;
+    outR = wR / wSum;
+    outG = wG / wSum;
+    outB = wB / wSum;
+    return true;
+}
+
+/// glTF emissiveFactor [* emissive map mean] -> finish { emission }.
+/// Per-texel emission maps are not wired; map contributes a mean colour only.
+/// With radiosity, emission also bounces light into the scene.
+void ApplyAssimpEmissiveFinish(Parser *parser, TEXTURE *tex, const aiMaterial *mat,
+                               const aiScene *scene, const std::string &modelDir, bool &usedImageMap)
+{
+    if (tex == nullptr || tex->Finish == nullptr || mat == nullptr)
+        return;
+
+    aiColor3D ke(0.0f, 0.0f, 0.0f);
+    float intensity = 1.0f;
+    const bool haveKe = (mat->Get(AI_MATKEY_COLOR_EMISSIVE, ke) == AI_SUCCESS);
+    mat->Get(AI_MATKEY_EMISSIVE_INTENSITY, intensity);
+
+    bool mapFlag = false;
+    AssimpMapRef emap =
+        TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_EMISSIVE, "emissive", mapFlag);
+    usedImageMap = usedImageMap || mapFlag;
+
+    DBL mapR = 1.0, mapG = 1.0, mapB = 1.0;
+    bool haveMapMean = false;
+    if (emap.Ok())
+    {
+        ImageData *img = LoadAssimpMapRef(parser, emap, true);
+        haveMapMean = MeanRgbFromAssimpImage(img, mapR, mapG, mapB);
+        Destroy_Image(img);
+        parser->Warning("Assimp emissive map '%s' averaged into finish emission (per-texel not wired).",
+                        emap.label.c_str());
+    }
+
+    if (!haveKe && !haveMapMean)
+        return;
+
+    if (!haveKe)
+        ke = aiColor3D(1.0f, 1.0f, 1.0f);
+    if (!haveMapMean)
+        mapR = mapG = mapB = 1.0;
+
+    const DBL er = Clamp01(static_cast<DBL>(ke.r) * mapR * intensity);
+    const DBL eg = Clamp01(static_cast<DBL>(ke.g) * mapG * intensity);
+    const DBL eb = Clamp01(static_cast<DBL>(ke.b) * mapB * intensity);
+    const DBL lum = 0.2126 * er + 0.7152 * eg + 0.0722 * eb;
+    if (lum < 1.0e-4)
+        return;
+
+    tex->Finish->Emission = ToMathColour(RGBColour(er, eg, eb));
+    parser->Warning("Assimp emissive finish rgb<%.3f,%.3f,%.3f> (intensity=%.3f).", er, eg, eb, intensity);
+}
+
 void AttachAssimpBumpMap(Parser *parser, TEXTURE *tex, const AssimpMapRef &ref, DBL amount)
 {
     ImageData *image = LoadAssimpMapRef(parser, ref, false);
@@ -503,19 +670,33 @@ TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiScene *scene, con
     if (tex->Finish == nullptr)
         tex->Finish = Create_Finish();
 
-    const DBL specAmt = 0.2126 * ks.r + 0.7152 * ks.g + 0.0722 * ks.b;
-    if (specAmt > 0.01)
+    // Prefer glTF metallic-roughness factors when present; else classic Ks/Ns.
+    float metallicProbe = 0.0f;
+    float roughnessProbe = 0.0f;
+    const bool hasPbr =
+        (mat != nullptr) &&
+        ((mat->Get(AI_MATKEY_METALLIC_FACTOR, metallicProbe) == AI_SUCCESS) ||
+         (mat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessProbe) == AI_SUCCESS));
+    if (hasPbr)
     {
-        tex->Finish->Specular = static_cast<SNGL>(Clamp01(specAmt));
-        if (shininess > 1.0f)
-            tex->Finish->Roughness = static_cast<SNGL>(1.0 / (1.0 + shininess / 10.0));
+        ApplyAssimpPbrFinish(parser, tex, mat, scene, modelDir, usedImageMap);
+    }
+    else
+    {
+        const DBL specAmt = 0.2126 * ks.r + 0.7152 * ks.g + 0.0722 * ks.b;
+        if (specAmt > 0.01)
+        {
+            tex->Finish->Specular = static_cast<SNGL>(Clamp01(specAmt));
+            if (shininess > 1.0f)
+                tex->Finish->Roughness = static_cast<SNGL>(1.0 / (1.0 + shininess / 10.0));
+        }
     }
 
     bool mapFlag = false;
     const AssimpMapRef specularMap =
         TryGetAssimpTexture(parser, scene, mat, modelDir, aiTextureType_SPECULAR, "specular", mapFlag);
     if (specularMap.Ok())
-        parser->Warning("Assimp specular map applied as finish specular from Ks (image map not layered yet): '%s'.",
+        parser->Warning("Assimp specular map noted (image map not layered yet): '%s'.",
                         specularMap.label.c_str());
     usedImageMap = usedImageMap || mapFlag;
 
@@ -542,6 +723,8 @@ TEXTURE *MakeTextureFromAssimpMaterial(Parser *parser, const aiScene *scene, con
     else if (normal.Ok())
         parser->Warning("Assimp normal map '%s' noted (height/bump already attached).", normal.label.c_str());
     usedImageMap = usedImageMap || mapFlag;
+
+    ApplyAssimpEmissiveFinish(parser, tex, mat, scene, modelDir, usedImageMap);
 
     Post_Textures(tex);
     return tex;

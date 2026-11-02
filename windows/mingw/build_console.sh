@@ -332,7 +332,24 @@ copy_runtime_dll libwinpthread-1.dll \
   "$ASSIMP_MINGW/bin/libwinpthread-1.dll" \
   "$MINGW_SYSROOT_BIN/libwinpthread-1.dll" || true
 
+# Optional POVWIN editor DLLs (cmedit + povcmax) from gitignored ./shipped_dll/
+if [[ "$FRONTEND" == "gui" ]]; then
+  SHIPPED_DLL="${SHIPPED_DLL:-$ROOT/shipped_dll}"
+  if [[ -d "$SHIPPED_DLL" ]]; then
+    for ed in cmedit64.dll povcmax64.dll cmedit32.dll povcmax32.dll \
+              cmedit32-sse2.dll povcmax32-sse2.dll; do
+      if [[ -f "$SHIPPED_DLL/$ed" ]]; then
+        cp -f "$SHIPPED_DLL/$ed" "$OUT/$ed"
+        echo "Editor DLL: $OUT/$ed" | tee -a "$LOG"
+      fi
+    done
+  else
+    echo "NOTE: no $SHIPPED_DLL - GUI File/Open editor menus need cmedit64.dll + povcmax64.dll" | tee -a "$LOG"
+  fi
+fi
+
 file "$OUT/$EXE_NAME" | tee -a "$LOG"
 ls -lh "$OUT/$EXE_NAME" "$OUT"/libassimp-6.dll "$OUT"/libwebpdecoder.dll \
-  "$OUT"/zlib1.dll "$OUT"/libwinpthread-1.dll 2>/dev/null | tee -a "$LOG" || true
+  "$OUT"/zlib1.dll "$OUT"/libwinpthread-1.dll \
+  "$OUT"/cmedit64.dll "$OUT"/povcmax64.dll 2>/dev/null | tee -a "$LOG" || true
 echo "DONE $OUT/$EXE_NAME (frontend=$FRONTEND, gsplat/Assimp/Vulkan)"

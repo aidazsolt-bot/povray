@@ -268,3 +268,6 @@ $RECYCLE.BIN/
 
 # Local scratch / smoke renders (not for git)
 /tmp/
+
+# Official POVWIN editor DLLs (not AGPL; local cache)
+/shipped_dll/

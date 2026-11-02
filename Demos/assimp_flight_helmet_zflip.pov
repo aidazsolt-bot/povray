@@ -1,7 +1,22 @@
 // Assimp import demo — Khronos FlightHelmet.gltf
 // Same framing as assimp_flight_helmet.pov with camera location.z flipped (* -1).
 #version 3.8;
-global_settings { assumed_gamma 1.0 }
+global_settings {
+  assumed_gamma 1.0
+  ambient_light rgb 0.15
+  radiosity {
+    pretrace_start 0.08
+    pretrace_end 0.02
+    count 80
+    nearest_count 8
+    error_bound 0.4
+    recursion_limit 2
+    low_error_factor 0.7
+    gray_threshold 0.0
+    minimum_reuse 0.015
+    brightness 1.0
+  }
+}
 
 camera {
   location <0.7370, 1.3318, 2.1497>
