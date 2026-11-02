@@ -2360,9 +2360,24 @@ GAUSSIAN_SPLAT:
     [sigma_extent FLOAT]
     [max_quad_frac FLOAT]
     [ewa_filter FLOAT]
+    [backend cpu | vulkan]
     [OBJECT_MODIFIER...]
     }
 </pre>
+
+<p><code>backend</code> selects the primary-hit splat projector. The default
+is <code>cpu</code>. <code>backend vulkan</code> is opt-in when the binary was
+built with Vulkan Gaussian-splat support; device or dispatch failure falls
+back to CPU with a console diagnostic. Vulkan accelerates only the primary
+framebuffer bake; secondary rays and the rest of POV-Ray remain on the CPU.
+On a fair MinGW <code>apple_orbit</code> A/B at 1024&times;800 (~36k splats,
+GeForce MX150) the Vulkan bake was fast
+(<code>host_gpu&approx;284ms</code> / <code>gpu_ts&approx;68ms</code>) while
+Trace/wall still favored <code>backend cpu</code> (Trace ~20s / wall ~48s
+vs Vulkan Trace ~50s / wall ~57s). Results vary by GPU; see
+<code>windows/vs2022/GSPLAT_DEPS.md</code>. Disable an option line with a POV
+comment (<code>// backend vulkan</code>), not with <code>#</code>
+(<code>#</code> starts directives such as <code>#declare</code>).</p>
 
 <p>All numeric values use the normal POV-Ray float-expression parser.
 Consequently, decimal values and arithmetic expressions such as

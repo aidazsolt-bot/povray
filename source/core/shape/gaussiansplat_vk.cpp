@@ -160,6 +160,57 @@ bool VkCheck(VkResult r)
     return r == VK_SUCCESS;
 }
 
+const char *VkResultName(VkResult r)
+{
+    switch (r)
+    {
+        case VK_SUCCESS: return "SUCCESS";
+        case VK_NOT_READY: return "NOT_READY";
+        case VK_TIMEOUT: return "TIMEOUT";
+        case VK_EVENT_SET: return "EVENT_SET";
+        case VK_EVENT_RESET: return "EVENT_RESET";
+        case VK_INCOMPLETE: return "INCOMPLETE";
+        case VK_ERROR_OUT_OF_HOST_MEMORY: return "OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_DEVICE_LOST: return "DEVICE_LOST";
+        case VK_ERROR_MEMORY_MAP_FAILED: return "MEMORY_MAP_FAILED";
+        case VK_ERROR_LAYER_NOT_PRESENT: return "LAYER_NOT_PRESENT";
+        case VK_ERROR_EXTENSION_NOT_PRESENT: return "EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT: return "FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER: return "INCOMPATIBLE_DRIVER";
+        case VK_ERROR_TOO_MANY_OBJECTS: return "TOO_MANY_OBJECTS";
+        case VK_ERROR_FORMAT_NOT_SUPPORTED: return "FORMAT_NOT_SUPPORTED";
+        case VK_ERROR_FRAGMENTED_POOL: return "FRAGMENTED_POOL";
+        case VK_ERROR_UNKNOWN: return "UNKNOWN";
+        default: return "OTHER";
+    }
+}
+
+bool SubmitAndWait(DeviceContext &d, VkCommandBuffer cmd, GenericMessenger *messenger, const char *tag)
+{
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    const VkResult sr = vkQueueSubmit(d.queue, 1, &si, VK_NULL_HANDLE);
+    const VkResult wr = (sr == VK_SUCCESS) ? vkQueueWaitIdle(d.queue) : VK_RESULT_MAX_ENUM;
+    if (sr == VK_SUCCESS && wr == VK_SUCCESS)
+        return true;
+    char logbuf[256];
+    std::snprintf(logbuf, sizeof(logbuf),
+        "gaussian_splat vulkan: %s failed submit=%s wait=%s",
+        tag, VkResultName(sr),
+        (sr == VK_SUCCESS) ? VkResultName(wr) : "n/a");
+    LogVk(messenger, logbuf);
+    if (sr == VK_ERROR_DEVICE_LOST || wr == VK_ERROR_DEVICE_LOST)
+    {
+        LogVk(messenger,
+            "gaussian_splat vulkan: DEVICE_LOST (often Windows TDR on long compute; "
+            "try smaller resolution or more GPU time via registry TdrDelay)");
+    }
+    return false;
+}
+
 VkShaderModule MakeShader(VkDevice dev, const uint32_t *words, size_t bytes)
 {
     VkShaderModuleCreateInfo ci = {};
@@ -227,7 +278,10 @@ struct Buffer
     VkDeviceMemory mem;
     VkDeviceSize size;
     void *mapped;
-    Buffer() : buf(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), size(0), mapped(nullptr) {}
+    bool hostVisible;
+    Buffer() :
+        buf(VK_NULL_HANDLE), mem(VK_NULL_HANDLE), size(0), mapped(nullptr), hostVisible(false)
+    {}
 };
 
 uint32_t FindMemoryType(VkPhysicalDevice phys, uint32_t bits, VkMemoryPropertyFlags flags)
@@ -242,10 +296,14 @@ uint32_t FindMemoryType(VkPhysicalDevice phys, uint32_t bits, VkMemoryPropertyFl
     return UINT32_MAX;
 }
 
-bool CreateBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage, Buffer &out)
+bool CreateBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage,
+                  VkMemoryPropertyFlags memFlags, Buffer &out)
 {
     out = Buffer();
+    if (size == 0)
+        return false;
     out.size = size;
+    out.hostVisible = (memFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     VkBufferCreateInfo bi = {};
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size;
@@ -255,8 +313,7 @@ bool CreateBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage,
         return false;
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(d.device, out.buf, &req);
-    uint32_t mt = FindMemoryType(d.phys, req.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    uint32_t mt = FindMemoryType(d.phys, req.memoryTypeBits, memFlags);
     if (mt == UINT32_MAX)
         return false;
     VkMemoryAllocateInfo ai = {};
@@ -267,9 +324,25 @@ bool CreateBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage,
         return false;
     if (!VkCheck(vkBindBufferMemory(d.device, out.buf, out.mem, 0)))
         return false;
-    if (!VkCheck(vkMapMemory(d.device, out.mem, 0, size, 0, &out.mapped)))
-        return false;
+    if (out.hostVisible)
+    {
+        if (!VkCheck(vkMapMemory(d.device, out.mem, 0, size, 0, &out.mapped)))
+            return false;
+    }
     return true;
+}
+
+bool CreateDeviceBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage, Buffer &out)
+{
+    // TRANSFER_* so staging upload/download and vkCmdFillBuffer work.
+    const VkBufferUsageFlags u = usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    return CreateBuffer(d, size, u, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out);
+}
+
+bool CreateHostBuffer(DeviceContext &d, VkDeviceSize size, VkBufferUsageFlags usage, Buffer &out)
+{
+    return CreateBuffer(d, size, usage,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, out);
 }
 
 void DestroyBuffer(DeviceContext &d, Buffer &b)
@@ -281,6 +354,31 @@ void DestroyBuffer(DeviceContext &d, Buffer &b)
     if (b.mem)
         vkFreeMemory(d.device, b.mem, nullptr);
     b = Buffer();
+}
+
+void CmdBufferBarrier(VkCommandBuffer cmd, VkBuffer buf, VkDeviceSize size,
+                      VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+                      VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+{
+    VkBufferMemoryBarrier bb = {};
+    bb.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bb.srcAccessMask = srcAccess;
+    bb.dstAccessMask = dstAccess;
+    bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb.buffer = buf;
+    bb.offset = 0;
+    bb.size = size;
+    vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 1, &bb, 0, nullptr);
+}
+
+void CmdCopyBuffer(VkCommandBuffer cmd, VkBuffer src, VkBuffer dst, VkDeviceSize size)
+{
+    VkBufferCopy region = {};
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size = size;
+    vkCmdCopyBuffer(cmd, src, dst, 1, &region);
 }
 
 void WriteDescBuffer(VkDevice dev, VkDescriptorSet set, uint32_t binding,
@@ -627,7 +725,7 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     const VkDeviceSize normalBytes = pix * sizeof(float) * 4;
 
     Buffer bSplats, bProjs, bCounts, bMeta, bOffsets, bCursor, bIndices;
-    Buffer bRGBA, bDepth, bNormal, bFrameUBO, bTileUBO, bBlendUBO;
+    Buffer bRGBA, bDepth, bNormal, bFrameUBO, bTileUBO, bBlendUBO, bStage;
 
     auto cleanup = [&]() {
         DestroyBuffer(d, bSplats); DestroyBuffer(d, bProjs);
@@ -635,32 +733,49 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
         DestroyBuffer(d, bOffsets); DestroyBuffer(d, bCursor); DestroyBuffer(d, bIndices);
         DestroyBuffer(d, bRGBA); DestroyBuffer(d, bDepth); DestroyBuffer(d, bNormal);
         DestroyBuffer(d, bFrameUBO); DestroyBuffer(d, bTileUBO); DestroyBuffer(d, bBlendUBO);
+        DestroyBuffer(d, bStage);
         vkResetDescriptorPool(d.device, d.descPool, 0);
+    };
+
+    auto failAlloc = [&](const char * what) {
+        char logbuf[256];
+        std::snprintf(logbuf, sizeof(logbuf),
+            "gaussian_splat vulkan: %s alloc failed (%dx%d splats=%u)",
+            what, imgW, imgH, n);
+        LogVk(messenger, logbuf);
+        cleanup();
+        return false;
     };
 
     const VkBufferUsageFlags SSBO = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const VkBufferUsageFlags UBO = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    const VkBufferUsageFlags STAGE =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-    if (!CreateBuffer(d, splatBytes, SSBO, bSplats) ||
-        !CreateBuffer(d, projBytes, SSBO, bProjs) ||
-        !CreateBuffer(d, countBytes, SSBO, bCounts) ||
-        !CreateBuffer(d, metaBytes, SSBO, bMeta) ||
-        !CreateBuffer(d, offBytes, SSBO, bOffsets) ||
-        !CreateBuffer(d, countBytes, SSBO, bCursor) ||
-        !CreateBuffer(d, rgbaBytes, SSBO, bRGBA) ||
-        !CreateBuffer(d, depthBytes, SSBO, bDepth) ||
-        !CreateBuffer(d, normalBytes, SSBO, bNormal) ||
-        !CreateBuffer(d, sizeof(FrameUBO), UBO, bFrameUBO) ||
-        !CreateBuffer(d, sizeof(TileUBO), UBO, bTileUBO) ||
-        !CreateBuffer(d, sizeof(BlendUBO), UBO, bBlendUBO))
+    // Large working set in DEVICE_LOCAL VRAM; small UBOs stay host-visible.
+    const VkDeviceSize stageBytes = std::max({
+        splatBytes, countBytes, offBytes, offBytes + countBytes,
+        rgbaBytes, depthBytes, normalBytes
+    });
+
+    if (!CreateDeviceBuffer(d, splatBytes, SSBO, bSplats) ||
+        !CreateDeviceBuffer(d, projBytes, SSBO, bProjs) ||
+        !CreateDeviceBuffer(d, countBytes, SSBO, bCounts) ||
+        !CreateDeviceBuffer(d, metaBytes, SSBO, bMeta) ||
+        !CreateDeviceBuffer(d, offBytes, SSBO, bOffsets) ||
+        !CreateDeviceBuffer(d, countBytes, SSBO, bCursor) ||
+        !CreateDeviceBuffer(d, rgbaBytes, SSBO, bRGBA) ||
+        !CreateDeviceBuffer(d, depthBytes, SSBO, bDepth) ||
+        !CreateDeviceBuffer(d, normalBytes, SSBO, bNormal) ||
+        !CreateHostBuffer(d, sizeof(FrameUBO), UBO, bFrameUBO) ||
+        !CreateHostBuffer(d, sizeof(TileUBO), UBO, bTileUBO) ||
+        !CreateHostBuffer(d, sizeof(BlendUBO), UBO, bBlendUBO) ||
+        !CreateHostBuffer(d, stageBytes, STAGE, bStage))
     {
-        cleanup();
-        return false;
+        return failAlloc("DEVICE_LOCAL/staging buffer");
     }
 
-    std::memcpy(bSplats.mapped, splats.data(), static_cast<size_t>(splatBytes));
-    std::memset(bCounts.mapped, 0, static_cast<size_t>(countBytes));
-    std::memset(bMeta.mapped, 0, static_cast<size_t>(metaBytes));
+    std::memcpy(bStage.mapped, splats.data(), static_cast<size_t>(splatBytes));
 
     FrameUBO fubo = {};
     fubo.origin[0] = static_cast<float>(cam.origin[X]);
@@ -695,12 +810,12 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     tubo.dims[0] = static_cast<float>(tilesX);
     tubo.dims[1] = static_cast<float>(tilesY);
     tubo.dims[2] = static_cast<float>(cloud.sigmaExtent);
-    // maxKeys filled after count
     std::memcpy(bTileUBO.mapped, &tubo, sizeof(tubo));
 
     VkDescriptorSet setProject = VK_NULL_HANDLE, setCount = VK_NULL_HANDLE;
     if (!AllocSet(d, d.dslProject, setProject) || !AllocSet(d, d.dslTileCount, setCount))
     {
+        LogVk(messenger, "gaussian_splat vulkan: descriptor alloc failed (pass0)");
         cleanup();
         return false;
     }
@@ -735,6 +850,19 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, d.queryPool, 0);
     }
 
+    CmdCopyBuffer(cmd, bStage.buf, bSplats.buf, splatBytes);
+    vkCmdFillBuffer(cmd, bCounts.buf, 0, countBytes, 0);
+    vkCmdFillBuffer(cmd, bMeta.buf, 0, metaBytes, 0);
+    CmdBufferBarrier(cmd, bSplats.buf, splatBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CmdBufferBarrier(cmd, bCounts.buf, countBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CmdBufferBarrier(cmd, bMeta.buf, metaBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
     const uint32_t groupsN = (n + 255u) / 256u;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipeProject);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.plProject, 0, 1, &setProject, 0, nullptr);
@@ -745,24 +873,27 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.plTileCount, 0, 1, &setCount, 0, nullptr);
     vkCmdDispatch(cmd, groupsN, 1, 1);
     MemoryBarrierSSBO(cmd);
+
+    CmdBufferBarrier(cmd, bCounts.buf, countBytes,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    CmdCopyBuffer(cmd, bCounts.buf, bStage.buf, countBytes);
+    CmdBufferBarrier(cmd, bStage.buf, countBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
     if (useTs)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.queryPool, 1);
 
     vkEndCommandBuffer(cmd);
-    VkSubmitInfo si = {};
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd;
-    if (!VkCheck(vkQueueSubmit(d.queue, 1, &si, VK_NULL_HANDLE)) ||
-        !VkCheck(vkQueueWaitIdle(d.queue)))
+    if (!SubmitAndWait(d, cmd, messenger, "pass0"))
     {
         vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
         cleanup();
         return false;
     }
 
-    // Prefix sum on CPU from tile counts.
-    const uint32_t *counts = static_cast<const uint32_t *>(bCounts.mapped);
+    // Prefix sum on CPU from tile counts (staging readback).
+    const uint32_t *counts = static_cast<const uint32_t *>(bStage.mapped);
     std::vector<int32_t> offsets(static_cast<size_t>(nTiles + 1));
     int64_t total = 0;
     for (int t = 0; t < nTiles; ++t)
@@ -773,7 +904,6 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     offsets[static_cast<size_t>(nTiles)] = static_cast<int32_t>(total);
     if (total <= 0)
     {
-        // No coverage - empty frame is valid miss.
         out.width = imgW;
         out.height = imgH;
         out.origin = cam.origin;
@@ -792,16 +922,22 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     }
 
     const VkDeviceSize idxBytes = sizeof(int32_t) * static_cast<VkDeviceSize>(total);
-    if (!CreateBuffer(d, idxBytes, SSBO, bIndices))
+    if (!CreateDeviceBuffer(d, idxBytes, SSBO, bIndices))
     {
         vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
-        cleanup();
-        return false;
+        return failAlloc("indices DEVICE_LOCAL buffer");
     }
 
-    std::memcpy(bOffsets.mapped, offsets.data(), static_cast<size_t>(offBytes));
-    // cursor starts at offsets[t]
-    std::memcpy(bCursor.mapped, offsets.data(), static_cast<size_t>(countBytes));
+    // Pack offsets + cursor into staging for one upload.
+    // offsets: nTiles+1 ints; cursor: first nTiles ints (== offsets[0..nTiles)).
+    if (offBytes + countBytes > stageBytes)
+    {
+        vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
+        return failAlloc("staging too small for offsets+cursor");
+    }
+    std::memcpy(bStage.mapped, offsets.data(), static_cast<size_t>(offBytes));
+    std::memcpy(static_cast<char *>(bStage.mapped) + offBytes,
+                offsets.data(), static_cast<size_t>(countBytes));
     tubo.dims[3] = static_cast<float>(total);
     std::memcpy(bTileUBO.mapped, &tubo, sizeof(tubo));
 
@@ -827,6 +963,7 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     VkDescriptorSet setWrite = VK_NULL_HANDLE, setBlend = VK_NULL_HANDLE;
     if (!AllocSet(d, d.dslTileWrite, setWrite) || !AllocSet(d, d.dslBlend, setBlend))
     {
+        LogVk(messenger, "gaussian_splat vulkan: descriptor alloc failed (pass1)");
         vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
         cleanup();
         return false;
@@ -849,27 +986,89 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     vkBeginCommandBuffer(cmd, &begin);
     if (useTs)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, d.queryPool, 2);
+
+    VkBufferCopy offCopy = {};
+    offCopy.srcOffset = 0;
+    offCopy.dstOffset = 0;
+    offCopy.size = offBytes;
+    vkCmdCopyBuffer(cmd, bStage.buf, bOffsets.buf, 1, &offCopy);
+    VkBufferCopy curCopy = {};
+    curCopy.srcOffset = offBytes;
+    curCopy.dstOffset = 0;
+    curCopy.size = countBytes;
+    vkCmdCopyBuffer(cmd, bStage.buf, bCursor.buf, 1, &curCopy);
+    CmdBufferBarrier(cmd, bOffsets.buf, offBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CmdBufferBarrier(cmd, bCursor.buf, countBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // Clear framebuffer targets before blend.
+    vkCmdFillBuffer(cmd, bRGBA.buf, 0, rgbaBytes, 0);
+    vkCmdFillBuffer(cmd, bDepth.buf, 0, depthBytes, 0);
+    vkCmdFillBuffer(cmd, bNormal.buf, 0, normalBytes, 0);
+    CmdBufferBarrier(cmd, bRGBA.buf, rgbaBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CmdBufferBarrier(cmd, bDepth.buf, depthBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CmdBufferBarrier(cmd, bNormal.buf, normalBytes,
+        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // pass1a: tile index write only (separate submit so a long blend cannot
+    // roll the whole pass into one Windows TDR window).
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipeTileWrite);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.plTileWrite, 0, 1, &setWrite, 0, nullptr);
     vkCmdDispatch(cmd, groupsN, 1, 1);
     MemoryBarrierSSBO(cmd);
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipeBlend);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.plBlend, 0, 1, &setBlend, 0, nullptr);
-    const uint32_t gx = (static_cast<uint32_t>(imgW) + 7u) / 8u;
-    const uint32_t gy = (static_cast<uint32_t>(imgH) + 7u) / 8u;
-    vkCmdDispatch(cmd, gx, gy, 1);
-    MemoryBarrierSSBO(cmd);
-    if (useTs)
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.queryPool, 3);
     vkEndCommandBuffer(cmd);
-
-    if (!VkCheck(vkQueueSubmit(d.queue, 1, &si, VK_NULL_HANDLE)) ||
-        !VkCheck(vkQueueWaitIdle(d.queue)))
+    if (!SubmitAndWait(d, cmd, messenger, "pass1 tile_write"))
     {
         vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
         cleanup();
         return false;
+    }
+
+    // pass1b: blend in horizontal strips via DispatchBase so each submit stays
+    // under typical TDR limits on weak discrete GPUs (e.g. MX150).
+    const uint32_t gx = (static_cast<uint32_t>(imgW) + 7u) / 8u;
+    const uint32_t gy = (static_cast<uint32_t>(imgH) + 7u) / 8u;
+    constexpr uint32_t kBlendStripGy = 16; // 16*8 = 128 pixel rows per submit
+    for (uint32_t y0 = 0; y0 < gy; y0 += kBlendStripGy)
+    {
+        const uint32_t nGy = std::min(kBlendStripGy, gy - y0);
+        const bool lastStrip = (y0 + nGy >= gy);
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &begin);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.pipeBlend);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, d.plBlend, 0, 1, &setBlend, 0, nullptr);
+        vkCmdDispatchBase(cmd, 0, y0, 0, gx, nGy, 1);
+        if (lastStrip)
+        {
+            if (useTs)
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.queryPool, 3);
+            CmdBufferBarrier(cmd, bRGBA.buf, rgbaBytes,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            CmdBufferBarrier(cmd, bDepth.buf, depthBytes,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            CmdBufferBarrier(cmd, bNormal.buf, normalBytes,
+                VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        }
+        vkEndCommandBuffer(cmd);
+        char stripTag[64];
+        std::snprintf(stripTag, sizeof(stripTag), "pass1 blend y=%u/%u", y0, gy);
+        if (!SubmitAndWait(d, cmd, messenger, stripTag))
+        {
+            vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
+            cleanup();
+            return false;
+        }
     }
 
     out.width = imgW;
@@ -883,9 +1082,28 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     out.rgba.resize(static_cast<size_t>(pix) * 4);
     out.depth.resize(static_cast<size_t>(pix));
     out.normal.resize(static_cast<size_t>(pix) * 4);
-    std::memcpy(out.rgba.data(), bRGBA.mapped, static_cast<size_t>(rgbaBytes));
-    std::memcpy(out.depth.data(), bDepth.mapped, static_cast<size_t>(depthBytes));
-    std::memcpy(out.normal.data(), bNormal.mapped, static_cast<size_t>(normalBytes));
+
+    auto readback = [&](VkBuffer src, VkDeviceSize bytes, void *dst) -> bool {
+        vkResetCommandBuffer(cmd, 0);
+        vkBeginCommandBuffer(cmd, &begin);
+        CmdCopyBuffer(cmd, src, bStage.buf, bytes);
+        CmdBufferBarrier(cmd, bStage.buf, bytes,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+        vkEndCommandBuffer(cmd);
+        if (!SubmitAndWait(d, cmd, messenger, "framebuffer readback"))
+            return false;
+        std::memcpy(dst, bStage.mapped, static_cast<size_t>(bytes));
+        return true;
+    };
+    if (!readback(bRGBA.buf, rgbaBytes, out.rgba.data()) ||
+        !readback(bDepth.buf, depthBytes, out.depth.data()) ||
+        !readback(bNormal.buf, normalBytes, out.normal.data()))
+    {
+        vkFreeCommandBuffers(d.device, d.cmdPool, 1, &cmd);
+        cleanup();
+        return false;
+    }
     out.valid = true;
 
     double gpuTsMs = -1.0;
@@ -922,14 +1140,14 @@ bool GaussianSplatVkRenderFrame(const GaussianSplatCloud& cloud,
     {
         std::snprintf(logbuf, sizeof(logbuf),
             "gaussian_splat vulkan frame: %dx%d splats=%u host_gpu=%.2fms gpu_ts=%.2fms "
-            "device='%s' (%s)",
+            "device='%s' (%s) mem=device_local",
             imgW, imgH, n, hostMs, gpuTsMs, d.deviceName, d.deviceType);
     }
     else
     {
         std::snprintf(logbuf, sizeof(logbuf),
             "gaussian_splat vulkan frame: %dx%d splats=%u host_gpu=%.2fms gpu_ts=n/a "
-            "device='%s' (%s)",
+            "device='%s' (%s) mem=device_local",
             imgW, imgH, n, hostMs, d.deviceName, d.deviceType);
     }
     LogVk(messenger, logbuf);

@@ -36,6 +36,17 @@
   </PropertyGroup>
   <!-- ========== END EDIT ========== -->
 
+  <!-- BUILT_BY via PreprocessorDefinitions (do not edit source/base/build.h).
+       Override: msbuild ... /p:PovBuiltBy="your name" -->
+  <PropertyGroup>
+    <PovBuiltBy Condition="'$(PovBuiltBy)'==''">bill gates</PovBuiltBy>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>BUILT_BY=\"$(PovBuiltBy)\";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
   <PropertyGroup Condition="'$(PovEnableGsplatDeps)'=='true'">
     <_PropertySheetDisplayName>POV-Ray Gsplat Assimp+Vulkan deps (enabled)</_PropertySheetDisplayName>
   </PropertyGroup>

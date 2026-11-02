@@ -47,6 +47,11 @@ SPIR-V for the Vulkan path is embedded under
 `.comp` sources: `python3 source/core/shape/shaders/embed_spv.py`
 (needs `glslc`).
 
+Scene note: `gaussian_splat` defaults to `backend cpu`; use
+`backend vulkan` to opt in. Comment with `//`, not `#`. See
+`windows/vs2022/GSPLAT_DEPS.md` for speed/fallback notes (also apply to
+Unix/MinGW builds with Vulkan enabled).
+
 The --with-x ./configure option is currently meaningless as no X11
 display option is presently implemented.
 

@@ -68,7 +68,15 @@ for a in "${PASSTHRU[@]+"${PASSTHRU[@]}"}"; do
     --enable-static|--enable-static=*|--disable-shared|--disable-shared=*) want_full_static=1 ;;
   esac
 done
-export CXXFLAGS="${CXXFLAGS:-}${CXXFLAGS:+ }-std=gnu++14 -pthread"
+# Release defaults: -O2 -DNDEBUG, and undo _GLIBCXX_ASSERTIONS (Fedora RPM
+# optflags / accidental inject) so vector::operator[] does not abort on Win.
+# Set CXXFLAGS yourself to fully override; MINGW_CXXFLAGS_RELEASE=0 skips these.
+_user_cxx="${CXXFLAGS:-}"
+if [[ "${MINGW_CXXFLAGS_RELEASE:-1}" != "0" ]]; then
+  export CXXFLAGS="-O2 -DNDEBUG -Wp,-U_GLIBCXX_ASSERTIONS ${_user_cxx} -std=gnu++14 -pthread"
+else
+  export CXXFLAGS="${_user_cxx}${_user_cxx:+ }-std=gnu++14 -pthread"
+fi
 export PTHREAD_CFLAGS=""
 if (( want_full_static )); then
   export LDFLAGS="${LDFLAGS:-}"
