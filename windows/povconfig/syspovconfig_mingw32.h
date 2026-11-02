@@ -39,6 +39,11 @@
 #ifndef POVRAY_WINDOWS_SYSPOVCONFIG_MINGW32_H
 #define POVRAY_WINDOWS_SYSPOVCONFIG_MINGW32_H
 
+// Autotools MinGW cross builds place OPENEXR_MISSING / BUILT_BY here.
+#ifdef HAVE_CONFIG_H
+# include "config.h"
+#endif
+
 #include <cstdint>
 #include <x86intrin.h>
 

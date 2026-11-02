@@ -372,6 +372,19 @@ some of the POV-Ray developers may be available for contract work,
 depending on the circumstance. Please contact us for more information.
 
 
+MinGW-w64 (experimental Autotools)
+==================================
+
+`windows/mingw/build_console.sh` wraps `./configure --host=x86_64-w64-mingw32`
+and `make` (see `unix/install.txt` §3.1.4):
+
+- Console (Unix VFE): default -> `povray.exe`
+- POVWIN GUI: `--enable-mingw-gui` or `MINGW_GUI=true` -> `pvengine64.exe`
+
+Optional editor DLLs are copied from `shipped_dll/` after a GUI build.
+Prefer Visual Studio for the official Windows IDE.
+
+
 Thanks
 ======
 

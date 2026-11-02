@@ -39,7 +39,7 @@
 #ifndef OPENEXR_MISSING
 
 // C++ variants of C standard header files
-//  (none at the moment)
+#include <cstdint>
 
 // C++ standard header files
 #include <memory>
@@ -50,6 +50,7 @@
 #include <ImfStringAttribute.h>
 #include <ImfMatrixAttribute.h>
 #include <ImfArray.h>
+#include <OpenEXRConfig.h>
 
 // POV-Ray header files (base module)
 #include "base/fileinputoutput.h"
@@ -75,6 +76,11 @@ using namespace Imath;
 /*****************************************************************************
 * Local preprocessor defines
 ******************************************************************************/
+#if (OPENEXR_VERSION_MAJOR < 3)
+    #define OPENEXR_INT64 Int64
+#else
+    #define OPENEXR_INT64 uint64_t
+#endif
 
 /*****************************************************************************
 * Local typedefs
@@ -95,17 +101,17 @@ class POV_EXR_OStream final : public Imf::OStream
                 throw POV_EXCEPTION(kFileDataErr, "Error while writing EXR output");
         }
 
-        virtual Int64 tellp() override
+        virtual OPENEXR_INT64 tellp() override
         {
-            unsigned long pos = os.tellg();
+            POV_OFF_T pos = os.tellg();
             if((int) pos == -1)
                 throw POV_EXCEPTION(kFileDataErr, "Error while writing EXR output");
             return(pos);
         }
 
-        virtual void seekp(Int64 pos) override
+        virtual void seekp(OPENEXR_INT64 pos) override
         {
-            if(os.seekg((unsigned long)pos) == false)
+            if(os.seekg((POV_OFF_T)pos) == false)
                 throw POV_EXCEPTION(kFileDataErr, "Error when writing EXR output");
         }
     private:
@@ -136,22 +142,22 @@ class POV_EXR_IStream final : public Imf::IStream
             return (is.tellg() < fsize);
         }
 
-        virtual Int64 tellg() override
+        virtual OPENEXR_INT64 tellg() override
         {
-            unsigned long pos = is.tellg();
+            POV_OFF_T pos = is.tellg();
             if((int)pos == -1)
                 throw POV_EXCEPTION(kFileDataErr, "Error while reading EXR file");
             return pos;
         }
 
-        virtual void seekg(Int64 pos) override
+        virtual void seekg(OPENEXR_INT64 pos) override
         {
-            if(is.seekg((unsigned long)pos) == false)
+            if(is.seekg((POV_OFF_T)pos) == false)
                 throw POV_EXCEPTION(kFileDataErr, "Error while reading EXR file");
         }
     private:
         pov_base::IStream& is;
-        unsigned long fsize;
+        POV_OFF_T fsize;
 };
 
 /*****************************************************************************

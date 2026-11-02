@@ -70,7 +70,10 @@ int main (void)
               ax_check_libtiff="unknown"
               AC_MSG_RESULT([$ax_check_libtiff])
             ],
-            [AC_MSG_RESULT([cross-compiling, forced])]
+            [
+              ax_check_libtiff="ok"
+              AC_MSG_RESULT([cross-compiling, forced])
+            ]
           )  # AC_RUN_IFELSE
         ],
         [ax_check_libtiff="no headers"]

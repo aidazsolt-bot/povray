@@ -45,6 +45,7 @@
 
 // POSIX standard header files
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // POV-Ray header files (base module)

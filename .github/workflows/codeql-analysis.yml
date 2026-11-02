@@ -1,6 +1,7 @@
 name: 'Code Analysis'
 
 on:
+  workflow_dispatch:
   push:
     branches: [ 'master', 'release/*' ]
     # There's no actual source code to examine in the following directories.
@@ -14,7 +15,7 @@ on:
 jobs:
   analyze:
     name: 'Analyze'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: read
@@ -29,6 +30,7 @@ jobs:
       uses: github/codeql-action/init@v4
       with:
         languages: cpp
+        build-mode: manual
         # Comment out the following to perform just the bare minimum of checks:
         queries: security-extended
         # Use the following instead to perform the whole suite of pre-defined checks:

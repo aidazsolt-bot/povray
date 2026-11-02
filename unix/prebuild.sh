@@ -429,15 +429,6 @@ case "$1" in
 # Makefile.am for the source distribution of POV-Ray $pov_version_base for UNIX
 # Please report bugs to $pov_config_bugreport
 
-# Programs to build.
-bin_PROGRAMS = povray
-
-# Source files.
-povray_SOURCES = \\
-  disp.h \\
-  disp_sdl.cpp disp_sdl.h \\
-  disp_text.cpp disp_text.h
-
 cppflags_platformcpu =
 ldadd_platformcpu =
 if BUILD_x86
@@ -454,7 +445,77 @@ if BUILD_x86avx2fma3
 ldadd_platformcpu += \$(top_builddir)/platform/libx86avx2fma3.a
 endif
 
-# Include paths for headers.
+# Libraries to link with.
+# Beware: order does matter!
+# TODO - Having vfe/libvfe.a twice in this list is a bit of a hackish way to cope with cyclic dependencies.
+# Optional Assimp / Vulkan gsplat: ./configure --enable-assimp --with-assimp=DIR
+# and/or --enable-vulkan-gsplat --with-vulkan-headers=DIR (flags land in CPPFLAGS/LIBS).
+# SPIR-V refresh: python3 source/core/shape/shaders/embed_spv.py (needs glslc).
+LDADD_COMMON = \\
+  \$(top_builddir)/vfe/libvfe.a \\
+  \$(top_builddir)/source/libpovray.a \\
+  \$(top_builddir)/vfe/libvfe.a \\
+  \$(top_builddir)/platform/libplatform.a \\
+  \$(ldadd_platformcpu)
+
+if MINGW_GUI
+
+bin_PROGRAMS = pvengine
+
+pvengine_SOURCES = \\
+  \$(top_srcdir)/windows/pvbitmap.cpp \\
+  \$(top_srcdir)/windows/pvdialog.cpp \\
+  \$(top_srcdir)/windows/pvdisplay.cpp \\
+  \$(top_srcdir)/windows/pvedit.cpp \\
+  \$(top_srcdir)/windows/pvengine.cpp \\
+  \$(top_srcdir)/windows/pvfiles.cpp \\
+  \$(top_srcdir)/windows/pvfrontend.cpp \\
+  \$(top_srcdir)/windows/pvguiext.cpp \\
+  \$(top_srcdir)/windows/pvmem.cpp \\
+  \$(top_srcdir)/windows/pvmenu.cpp \\
+  \$(top_srcdir)/windows/pvmisc.cpp \\
+  \$(top_srcdir)/windows/pvtext.cpp \\
+  \$(top_srcdir)/windows/pvupdate.cpp \\
+  \$(top_srcdir)/windows/winprecomp.cpp \\
+  \$(top_srcdir)/windows/rtrsupport/rtrsupport.cpp \\
+  \$(top_srcdir)/windows/rtrsupport/vidcap.cpp \\
+  \$(top_srcdir)/windows/rtrsupport/vidcapimpl.cpp
+
+pvengine_CXXFLAGS = \$(AM_CXXFLAGS) -Wno-unused
+pvengine_LDFLAGS = \$(POV_MINGW_GUI_LDFLAGS)
+pvengine_LDADD = \$(LDADD_COMMON) \$(POV_MINGW_GUI_LIBS) pvengine-rc.\$(OBJEXT)
+pvengine_DEPENDENCIES = \$(LDADD_COMMON) pvengine-rc.\$(OBJEXT)
+
+pvengine-rc.\$(OBJEXT): \$(top_srcdir)/windows/pvengine.rc \$(top_srcdir)/windows/mingw/fix_rc_paths.py
+	python3 \$(top_srcdir)/windows/mingw/fix_rc_paths.py \\
+	  \$(top_srcdir)/windows \$(builddir)/pvengine_mingw.rc
+	\$(WINDRES) -I\$(top_srcdir)/windows -I\$(top_srcdir)/windows/povconfig \\
+	  -DNDEBUG -o \$@ \$(builddir)/pvengine_mingw.rc
+
+CLEANFILES = pvengine_mingw.rc pvengine-rc.\$(OBJEXT)
+
+AM_CPPFLAGS = \\
+  -I\$(top_srcdir)/windows/povconfig \\
+  -I\$(top_srcdir)/windows \\
+  -I\$(top_srcdir)/windows/rtrsupport \\
+  -I\$(top_srcdir)/source \\
+  -I\$(top_builddir)/source \\
+  -I\$(top_srcdir)/platform/windows \\
+  \$(cppflags_platformcpu) \\
+  -I\$(top_srcdir)/vfe \\
+  -I\$(top_srcdir)/vfe/win
+
+else
+
+bin_PROGRAMS = povray
+
+povray_SOURCES = \\
+  disp.h \\
+  disp_sdl.cpp disp_sdl.h \\
+  disp_text.cpp disp_text.h
+
+povray_LDADD = \$(LDADD_COMMON)
+
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/unix/povconfig \\
   -I\$(top_srcdir)/source \\
@@ -464,18 +525,7 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/vfe \\
   -I\$(top_srcdir)/vfe/unix
 
-# Libraries to link with.
-# Beware: order does matter!
-# TODO - Having vfe/libvfe.a twice in this list is a bit of a hackish way to cope with cyclic dependencies.
-# Optional Assimp / Vulkan gsplat: ./configure --enable-assimp --with-assimp=DIR
-# and/or --enable-vulkan-gsplat --with-vulkan-headers=DIR (flags land in CPPFLAGS/LIBS).
-# SPIR-V refresh: python3 source/core/shape/shaders/embed_spv.py (needs glslc).
-LDADD = \\
-  \$(top_builddir)/vfe/libvfe.a \\
-  \$(top_builddir)/source/libpovray.a \\
-  \$(top_builddir)/vfe/libvfe.a \\
-  \$(top_builddir)/platform/libplatform.a \\
-  \$(ldadd_platformcpu)
+endif
 pbEOF
   ;;
 esac
@@ -829,6 +879,15 @@ cppflags_platformcpu += -I\$(top_srcdir)/platform/x86
 endif
 
 # Include paths for headers.
+if MINGW_GUI
+AM_CPPFLAGS = \\
+  -I\$(top_srcdir)/windows/povconfig \\
+  -I\$(top_srcdir)/windows \\
+  -I\$(top_srcdir)/platform/windows \\
+  \$(cppflags_platformcpu) \\
+  -I\$(top_srcdir)/vfe \\
+  -I\$(top_srcdir)/vfe/win
+else
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/unix/povconfig \\
   -I\$(top_srcdir)/platform/unix \\
@@ -836,6 +895,7 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/unix \\
   -I\$(top_srcdir)/vfe \\
   -I\$(top_srcdir)/vfe/unix
+endif
 pbEOF
   ;;
 esac
@@ -1344,7 +1404,9 @@ case "$1" in
 
   *)
   # includes the vfe/unix/ files to avoid circular dependencies when linking
-  files=`find $dir $dir/unix -maxdepth 1 -name \*.cpp -or -name \*.h | sed s,"$dir/",,g | sort`
+  files_unix=`find $dir $dir/unix -maxdepth 1 -name \*.cpp -or -name \*.h | sed s,"$dir/",,g | sort`
+  files_win=`find $dir -maxdepth 1 -name \*.cpp -or -name \*.h | sed s,"$dir/",,g | sort`
+  files_win="$files_win win/vfeplatform.cpp win/vfeplatform.h"
 
   echo "Create $makefile.am"
   cat Makefile.header > $makefile.am
@@ -1357,8 +1419,13 @@ case "$1" in
 noinst_LIBRARIES = libvfe.a
 
 # Source files.
+if MINGW_GUI
 libvfe_a_SOURCES = \\
-  `echo $files`
+  `echo $files_win`
+else
+libvfe_a_SOURCES = \\
+  `echo $files_unix`
+endif
 
 cppflags_platformcpu = 
 if BUILD_x86
@@ -1366,6 +1433,17 @@ cppflags_platformcpu += -I\$(top_srcdir)/platform/x86
 endif
 
 # Include paths for headers.
+if MINGW_GUI
+AM_CPPFLAGS = \\
+  -I\$(top_srcdir)/windows/povconfig \\
+  -I\$(top_srcdir)/windows \\
+  -I\$(top_srcdir)/windows/rtrsupport \\
+  -I\$(top_srcdir)/platform/windows \\
+  \$(cppflags_platformcpu) \\
+  -I\$(top_srcdir)/vfe/win \\
+  -I\$(top_srcdir)/vfe \\
+  -I\$(top_srcdir)/source
+else
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/unix/povconfig \\
   -I\$(top_srcdir)/platform/unix \\
@@ -1373,6 +1451,7 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/vfe/unix \\
   -I\$(top_srcdir)/unix \\
   -I\$(top_srcdir)/source
+endif
 
 # Extra definitions for compiling.
 # They cannot be placed in config.h since they indirectly rely on \$prefix.
@@ -1408,7 +1487,8 @@ case "$1" in
   ;;
 
   *)
-  files=`find $dir/unix -name "*.cpp" -or -name "*.h" | sed s,"$dir/",,g | sort`
+  files_unix=`find $dir/unix -name "*.cpp" -or -name "*.h" | sed s,"$dir/",,g | sort`
+  files_win=`find $dir/windows -name "*.cpp" -or -name "*.h" | sed s,"$dir/",,g | sort`
   files_x86=`find $dir/x86 -maxdepth 1 -name "*.cpp" -or -name "*.h" | sed s,"$dir/",,g | sort`
   for ext in avx avxfma4 avx2fma3; do
     files_ext=`find $dir/x86/$ext -name "*.cpp" -or -name "*.h" | sed s,"$dir/",,g | sort`
@@ -1453,10 +1533,25 @@ noinst_LIBRARIES = \\
   \$(libraries_platformcpu)
 
 # Source files.
+if MINGW_GUI
 libplatform_a_SOURCES = \\
-  `echo $files`
+  `echo $files_win`
+else
+libplatform_a_SOURCES = \\
+  `echo $files_unix`
+endif
 
 # Include paths for headers.
+if MINGW_GUI
+AM_CPPFLAGS = \\
+  -I\$(top_srcdir)/windows/povconfig \\
+  -I\$(top_srcdir)/windows \\
+  -I\$(top_srcdir)/platform/windows \\
+  \$(cppflags_platformcpu) \\
+  -I\$(top_srcdir)/vfe \\
+  -I\$(top_srcdir)/vfe/win \\
+  -I\$(top_srcdir)/source
+else
 AM_CPPFLAGS = \\
   -I\$(top_srcdir)/unix/povconfig \\
   -I\$(top_srcdir)/platform/unix \\
@@ -1465,6 +1560,7 @@ AM_CPPFLAGS = \\
   -I\$(top_srcdir)/vfe/unix \\
   -I\$(top_srcdir)/unix \\
   -I\$(top_srcdir)/source
+endif
 
 # Extra definitions for compiling.
 # They cannot be placed in config.h since they indirectly rely on \$prefix.

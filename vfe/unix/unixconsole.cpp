@@ -33,11 +33,16 @@
 ///
 //******************************************************************************
 
+// must come first, will pull in "config.h" for HAVE_* macros
+#include "syspovconfig.h"
+
 // C++ variants of C standard header files
+#include <cstdio>
 #include <csignal>
 #include <cstdlib>
 
 // C++ standard header files
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,9 +52,13 @@
 #include <boost/algorithm/string.hpp>
 
 // Other library header files
-#include <termios.h>
 #include <unistd.h>
-#include <sys/select.h>
+#ifdef HAVE_TERMIOS_H
+# include <termios.h>
+#endif
+#ifdef HAVE_SYS_SELECT_H
+# include <sys/select.h>
+#endif
 
 // from directory "vfe"
 #include "vfe.h"
@@ -101,6 +110,7 @@ static volatile bool gTerminateSignalHandler = false;
 // polling the signal and `SignalHandler()` processing the next signal.
 // Wouldn't it be smarter to register proper signal handlers?
 
+#ifdef HAVE_SIGSET_T
 static void SignalHandler (void)
 {
     sigset_t  sigset;
@@ -118,8 +128,11 @@ static void SignalHandler (void)
         signum = sigtimedwait(&sigset, nullptr, &timeout);
         if (signum == -1)
             continue; // Error. Presumably timed out; check whether to end the task.
-#else
+#elif defined(HAVE_SIGWAIT)
         (void)sigwait(&sigset, &signum);
+#else
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
 #endif
 
         // Got a signal.
@@ -127,6 +140,19 @@ static void SignalHandler (void)
         gSignalNumber = signum;
     }
 }
+#else
+// MinGW and other hosts without POSIX sigset_t: std::signal + idle helper thread.
+static void SimpleAsyncSignal(int signum)
+{
+    gSignalNumber = signum;
+}
+
+static void SignalHandler (void)
+{
+    while (!gTerminateSignalHandler)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+#endif
 
 
 static void ProcessSignal (void)
@@ -161,10 +187,12 @@ static void ProcessSignal (void)
             gCancelRender = true;
             break;
 #endif
+#ifdef SIGCHLD
         case SIGCHLD:
             // for now, ignore this (side-effect of the shell-out code).
             // once properly implemented, the shell-out code would want to know this has happened, though.
             break;
+#endif
 
         default:
             // fprintf(stderr, "\n%s: received signal %d\n", PACKAGE, gSignalNumber);
@@ -376,6 +404,7 @@ Press <Enter> to continue or <Ctrl-C> to abort.\n\
     );
 
     // wait for user input from stdin (including abort signals)
+#if defined(HAVE_SYS_SELECT_H) && defined(HAVE_TERMIOS_H)
     while (true)
     {
         ProcessSignal();
@@ -400,6 +429,16 @@ Press <Enter> to continue or <Ctrl-C> to abort.\n\
         }
         Delay(20);
     }
+#else
+    // MinGW and other hosts without POSIX tty select/termios: blocking read.
+    ProcessSignal();
+    if (gCancelRender)
+    {
+        fprintf(stderr, "Render cancelled by user\n");
+        return RETURN_USER_ABORT;
+    }
+    (void)std::fgetc(stdin);
+#endif
 
     std::string basename = UCS2toSysString(session->CreateTemporaryFile());
     ini = basename + ".ini";
@@ -430,17 +469,11 @@ static void CleanupBenchmark(vfeUnixSession *session, std::string& ini, std::str
 static void TerminateSignalHandler(std::thread* sigthread)
 {
     gTerminateSignalHandler = true;
-#ifdef HAVE_SIGTIMEDWAIT
-    // `std::thread`s must be `join`ed or `detach`ed before destruction,
-    // otherwise their destructor causes ungraceful termination of the entire
-    // program.
+#if defined(HAVE_SIGTIMEDWAIT) || !defined(HAVE_SIGSET_T)
+    // Timed wait (POSIX) or the MinGW idle sleeper can observe the flag and exit.
     sigthread->join();
 #else
-    // `std::thread`s must be `join`ed or `detach`ed before destruction,
-    // otherwise their destructor causes ungraceful termination of the entire
-    // program. `join` is not an option because we can't reliably make the
-    // thread terminate itself, so we must trust the OS that it will kill any
-    // `detach`ed threads when their parent process exits.
+    // Blocking sigwait cannot be woken; detach and let the process exit reap it.
     // TODO - This is a hackish solution.
     sigthread->detach();
 #endif
@@ -455,14 +488,15 @@ int main (int argc, char **argv)
     bool              running_benchmark = false;
     std::string       bench_ini_name;
     std::string       bench_pov_name;
-    sigset_t          sigset;
     std::thread*      sigthread;
     char **           argv_copy=argv; /* because argv is updated later */
     int               argc_copy=argc; /* because it might also be updated */
 
     /*fprintf(stderr, "%s: This is a RELEASE CANDIDATE version of POV-Ray. General distribution is discouraged.\n", PACKAGE);*/
 
+#ifdef HAVE_SIGSET_T
     // block some signals for this thread as well as those created afterwards
+    sigset_t sigset;
     sigemptyset(&sigset);
 
 #ifdef SIGQUIT
@@ -482,8 +516,16 @@ int main (int argc, char **argv)
 #endif
 
     pthread_sigmask(SIG_BLOCK, &sigset, nullptr);
+#else
+#ifdef SIGINT
+    std::signal(SIGINT, SimpleAsyncSignal);
+#endif
+#ifdef SIGTERM
+    std::signal(SIGTERM, SimpleAsyncSignal);
+#endif
+#endif
 
-    // create the signal handling thread
+    // create the signal handling thread (POSIX waiter, or idle helper on MinGW)
     sigthread = new std::thread(SignalHandler);
 
     session = new vfeUnixSession();

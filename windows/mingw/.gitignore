@@ -1,5 +1,4 @@
 /out/
 *.exe
-*.o
 *.log
-../pvengine_mingw.rc
+*.o

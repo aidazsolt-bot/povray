@@ -1,81 +1,48 @@
-# MinGW-w64 Windows build (console + GUI)
+# MinGW-w64 via GNU Autotools
 
-Cross-build (or native MinGW-w64) of the Windows POV-Ray front-ends:
-console (`vfe/win/console`) and optional POVWIN GUI (`windows/pv*.cpp`).
+Cross-build with the real repo `./configure` and `make`.
 
-## Requirements
-
-- `x86_64-w64-mingw32-g++` / `gcc` / `windres` (MinGW-w64 toolchain)
-- Bash, `rg`, `realpath`, `md5sum`, `python3`
-- Optional: Wine, to run the resulting `.exe` on Linux
-
-On Fedora/RHEL-style hosts:
-
-```bash
-dnf install mingw64-gcc-c++
-```
+| Frontend | Configure | Output |
+|---|---|---|
+| Console (Unix VFE) | default | `povray.exe` |
+| POVWIN GUI | `--enable-mingw-gui` | `pvengine` / `pvengine64.exe` |
 
 ## Build
 
-From the repository root:
-
 ```bash
-# Console (default) -> ./build-mingw/povray.exe
-./windows/mingw/build_console.sh
+# Console
+./windows/mingw/build_console.sh -- --enable-static
 
-# POVWIN GUI -> ./build-mingw/pvengine64.exe
-MINGW_FRONTEND=gui ./windows/mingw/build_console.sh
+# POVWIN GUI (MinGW host required)
+MINGW_GUI=true ./windows/mingw/build_console.sh -- --enable-static
+# same as:
+./windows/mingw/build_console.sh -- --enable-mingw-gui --enable-static
 ```
 
-Override output directory or toolchain if needed:
+Or manually:
 
 ```bash
-MINGW_OUT=$HOME/tmp/mingw_pov CXX=x86_64-w64-mingw32-g++ ./windows/mingw/build_console.sh
+cd unix && ./prebuild.sh && cd ..
+mkdir -p build-mingw && cd build-mingw
+../configure --host=x86_64-w64-mingw32 \
+  --enable-mingw-gui \
+  --enable-static \
+  COMPILED_BY="your name <email>" \
+  --prefix="$PWD/install"
+make -j"$(nproc)"
 ```
 
-Output (default `MINGW_OUT=./build-mingw`):
+After a GUI build, optional editor DLLs (`cmedit64.dll`, `povcmax64.dll`) are
+copied from `shipped_dll/` into the output directory when present.
 
-- Console: `$MINGW_OUT/povray.exe`
-- GUI: `$MINGW_OUT/pvengine64.exe` (objs in `obj-console/` vs `obj-gui/`)
-- Logs: `$MINGW_OUT/build-console.log` / `build-gui.log`
-- This feature branch also copies Assimp runtime DLLs next to the exe:
-  `libassimp-6.dll`, `libwebpdecoder.dll` (SOG/WebP), `zlib1.dll`,
-  `libwinpthread-1.dll`
-
-The exe itself is linked with `-static-libgcc -static-libstdc++` and static
-`libwinpthread`. Ship the Assimp/WebP DLLs beside it for model and Gaussian-splat
-imports (`assimp { }`, `gaussian_splat { }`, `mesh { assimp }`). Upstream
-experimental `mesh { obj }` is not enabled in this build.
-
-`BUILT_BY` is injected via `-D` (no need to edit `source/base/build.h`).
-
-## Features in this build
-
-| Feature | Status |
+| Variable | Default |
 |---|---|
-| Console VFE front-end (`_CONSOLE`) | Yes |
-| PNG / JPEG / Zlib | Yes (vendored `libraries/*`) |
-| TIFF | Yes (`tif_config.h.vc` / `tiffconf.h.vc` + `tif_win32.c`; also links `tif_extension.c`) |
-| AVX / AVX2 / FMA optimized noise | Yes (runtime CPUID dispatch; TUs built with `-mavx` / `-mavx2 -mfma` / `-mfma4`) |
-| OpenEXR (`.exr`) | **No** (`OPENEXR_MISSING`) – IlmImf/Half/Iex chain not wired yet |
-| POVWIN GUI (`MINGW_FRONTEND=gui`) | Yes (`pvengine64.exe`; MinGW CRT/`WinMain`, not MSVC `POVWINStartup`) |
-| Assimp / Gaussian-splat / Vulkan (volk) | Yes (this feature branch; sole import path) |
-| Native `mesh { obj }` (upstream experimental) | No (left default-off; use `assimp` / `gaussian_splat`) |
+| `MINGW_HOST` | `x86_64-w64-mingw32` |
+| `MINGW_OUT` | `<repo>/build-mingw` |
+| `MINGW_GUI` | `false` (`true` adds `--enable-mingw-gui`) |
+| `COMPILED_BY` | `MinGW-w64 cross <povray.git>` |
+| `SHIPPED_DLL` | `<repo>/shipped_dll` |
 
-TIFF note: `USE_WIN32_FILEIO` is set **only** when compiling `libraries/tiff/*.c`.
-POV-Ray's `source/base/image/tiff.cpp` uses `TIFFClientOpen` with `void*` client
-handles and is built with `AVOID_WIN32_FILEIO` instead.
-
-## Config headers
-
-Compiler detection lives in:
-
-- `windows/povconfig/syspovconfig.h` (MinGW branch, no longer `#error`)
-- `windows/povconfig/syspovconfig_mingw32.h` (fresh MinGW-w64 config; replaces pre-3.7 headers removed in 2013)
-
-## Notes
-
-- This is an **experimental** MinGW-w64 path, complementary to the official
-  Visual Studio build described in `windows/README.md`.
-- Cygwin/`unix/configure --without-cygwin-dll` is a separate (still BETA) path;
-  it uses `unix/povconfig`, not these Windows MinGW headers.
+Needs MinGW-w64 plus target image libs in the compiler sysroot (`zlib`,
+`libpng`, `jpeg`, `tiff`). Configure finds them without `--with-*=DIR`.
+See `libraries/build-mingw-sysroot-image-libs.sh`.
