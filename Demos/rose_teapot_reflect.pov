@@ -1,6 +1,5 @@
-// Rose.ply splat + chrome Utah teapot (advanced/teapot) for secondary-ray
-// reflection check. Teapot sits clear of the rose AABB; camera frames both
-// so the rose should appear in the chrome body.
+// InteriorDesign.ply splat + chrome Utah teapot for secondary-ray reflection.
+// Teapot/camera/floor framed as before (rose-era FloorY); splat asset swapped.
 #version 3.8;
 global_settings {
   assumed_gamma 1.0
@@ -11,16 +10,12 @@ global_settings {
 #include "textures.inc"
 #include "metals.inc"
 
-#declare RoseCenter   = <-1.7874, -2.6543, 0.4874>;
+// Keep floor/teapot height from the prior rose framing (teapot/camera unchanged).
 #declare RoseAabbMinY = -4.484253;
 #declare FloorY       = RoseAabbMinY - 0.05;
 
-// Teapot after Teapot_Orientation is ~3 units tall; scale and park on +X
-// so it does not intersect the rose (Assimp AABB max.x ~= -0.22).
 #declare TeapotScale  = 1.35;
-// After <-110,20,0> the pot sits near y~0; nudge so the base rests on FloorY.
-// A bit left (-X) and further from camera (+Z, deeper in frame).
-#declare TeapotPos    = <3.4, FloorY + 2.35, 1.2>;
+#declare TeapotPos    = <1.0, FloorY + 2.35, 1.2 + 4.0>;
 
 #declare Flat_Enough = 0.0001;
 #declare Teapot_Texture = T_Chrome_5E;
@@ -45,16 +40,13 @@ plane {
 }
 
 gaussian_splat {
-  "models/Rose.ply"
+  "models/InteriorDesign.ply"
   sh_degree 3
-  samples 2
+  // samples 2 OOMs/segfaults at >=~640px with this ~151k splat cloud.
+  samples 1
   alpha_stop 0.995
   opacity_cutoff 0.005
   gi_weight 1.0
-  // upright Y-up - rotate 180 about Z about AABB center
-  translate <1.7874, 2.6543, -0.4874>
-  rotate <0, 0, 180>
-  translate <-1.7874, -2.6543, 0.4874>
 }
 
 // teapot_inc_nodecl.inc is upstream teapot.inc without its Flat_Enough declare
