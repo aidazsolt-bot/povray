@@ -1434,16 +1434,21 @@ void Parser::Parse_Camera (Camera& Cam)
         Vector3d old_look_at, old_up, old_right, old_focal_point;
         DBL old_angle;
 
+        // Finite "unset" marker. Do not use HUGE_VAL/Inf: with -ffast-math,
+        // Inf equality after store/reload is unreliable (Angle >= 180 false
+        // positive; Up/Right never restored; look_at scales by Inf).
+        const DBL kCameraUnset = 1.0e+17;
+
         old_look_at     = New.Look_At;
-        New.Look_At     = Vector3d(HUGE_VAL);
+        New.Look_At     = Vector3d(kCameraUnset);
         old_up          = New.Up;
-        New.Up          = Vector3d(HUGE_VAL);
+        New.Up          = Vector3d(kCameraUnset);
         old_right       = New.Right;
-        New.Right       = Vector3d(HUGE_VAL);
+        New.Right       = Vector3d(kCameraUnset);
         old_focal_point = New.Focal_Point;
-        New.Focal_Point = Vector3d(HUGE_VAL);
+        New.Focal_Point = Vector3d(kCameraUnset);
         old_angle       = New.Angle;
-        New.Angle       = HUGE_VAL;
+        New.Angle       = kCameraUnset;
 
         EXPECT
             CASE (PERSPECTIVE_TOKEN)
@@ -1712,7 +1717,7 @@ void Parser::Parse_Camera (Camera& Cam)
         }
 
         // handle "up"
-        if (New.Up[X] == HUGE_VAL)
+        if (New.Up[X] == kCameraUnset)
         {
             New.Up = old_up; // restore default up
         }
@@ -1720,7 +1725,7 @@ void Parser::Parse_Camera (Camera& Cam)
             had_up = true;
 
         // handle "right"
-        if (New.Right[X] == HUGE_VAL)
+        if (New.Right[X] == kCameraUnset)
         {
             New.Right = old_right; // restore default right
         }
@@ -1728,7 +1733,7 @@ void Parser::Parse_Camera (Camera& Cam)
             had_right = true;
 
         // apply "angle"
-        if (New.Angle != HUGE_VAL)
+        if (New.Angle != kCameraUnset)
         {
             if ((New.Type == PERSPECTIVE_CAMERA) || (New.Type == ORTHOGRAPHIC_CAMERA))
             {
@@ -1750,7 +1755,7 @@ void Parser::Parse_Camera (Camera& Cam)
             New.Angle = old_angle; // restore default angle
 
         // apply "look_at"
-        if (New.Look_At[X] != HUGE_VAL)
+        if (New.Look_At[X] != kCameraUnset)
         {
             Direction_Length = New.Direction.length();
             Up_Length        = New.Up.length();
@@ -1822,7 +1827,7 @@ void Parser::Parse_Camera (Camera& Cam)
         }
 
         // apply "focal_point"
-        if (New.Focal_Point[X] != HUGE_VAL)
+        if (New.Focal_Point[X] != kCameraUnset)
         {
             tempv = New.Focal_Point - New.Location;
             New.Focal_Distance = tempv.length();

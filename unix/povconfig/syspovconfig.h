@@ -168,38 +168,51 @@
 #endif // BUILD_X86
 
 
-#ifdef HAVE_NAN
-    #if defined(HAVE_STD_ISNAN)
-        #define POV_ISNAN(x) std::isnan(x)
-    #elif defined(HAVE_ISNAN)
-        #define POV_ISNAN(x) isnan(x)
-    #elif defined(HAVE_EMULATED_ISNAN)
-        template<typename T>
-        inline bool pov_isnan(T x) { volatile T v = x; return (v != x); }
-        #define POV_ISNAN(x) pov_isnan(x)
-    #else
-        #error "Someone must have found an alternative way of identifying NaNs but failed to implement it here."
-    #endif
-#else
-    #define POV_ISNAN(x) (false)
+// Configure's isnan/isinf AC_RUN probes fail under -ffast-math (finite-math-only
+// folds the checks), leaving HAVE_NAN/HAVE_INF unset. On Unix IEEE targets the
+// values still exist; force the markers so colour invalidation stays consistent.
+#ifndef HAVE_NAN
+    #define HAVE_NAN
+#endif
+#ifndef HAVE_INF
+    #define HAVE_INF
 #endif
 
-#ifdef HAVE_INF
-    #if defined(HAVE_STD_ISINF)
-        #define POV_ISINF(x) std::isinf(x)
-    #elif defined(HAVE_ISINF)
-        #define POV_ISINF(x) isinf(x)
-    #elif defined(HAVE_EMULATED_ISINF)
-        template<typename T>
-        inline bool pov_isinf(T x) { volatile T v = std::numeric_limits<T>::max(); return std::fabs(x) > v; }
-        #define POV_ISINF(x) pov_isinf(x)
-    #else
-        #error "Someone must have found an alternative way of identifying infinities but failed to implement it here."
-    #endif
-#else
-    #define POV_ISINF(x) (false)
-#endif
+// IEEE-754 bit classifiers. GCC/Clang -ffast-math/-ffinite-math-only fold
+// std::isnan/isinf and even (x!=x) / fabs(x)>max to constants; bit tests stay correct.
+namespace pov_sys_detail {
+    inline bool bit_isnan(float x)
+    {
+        union { float f; unsigned int u; } a;
+        a.f = x;
+        return ((a.u & 0x7f800000u) == 0x7f800000u) && ((a.u & 0x007fffffu) != 0u);
+    }
+    inline bool bit_isnan(double x)
+    {
+        union { double d; unsigned long long u; } a;
+        a.d = x;
+        return ((a.u & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL)
+            && ((a.u & 0x000fffffffffffffULL) != 0ULL);
+    }
+    inline bool bit_isinf(float x)
+    {
+        union { float f; unsigned int u; } a;
+        a.f = x;
+        return (a.u & 0x7fffffffu) == 0x7f800000u;
+    }
+    inline bool bit_isinf(double x)
+    {
+        union { double d; unsigned long long u; } a;
+        a.d = x;
+        return (a.u & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL;
+    }
+}
 
+// Always use bit tests on Unix. HAVE_NAN/HAVE_INF still control whether
+// colour code *stores* NaN/Inf as invalid markers (configure probes); the
+// classifiers themselves must not rely on libc under -ffast-math.
+#define POV_ISNAN(x) (::pov_sys_detail::bit_isnan(x))
+#define POV_ISINF(x) (::pov_sys_detail::bit_isinf(x))
 #define POV_ISFINITE(x) (!POV_ISNAN(x) && !POV_ISINF(x))
 
 #if defined INT8_MAX || defined int8_t
