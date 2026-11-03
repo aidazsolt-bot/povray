@@ -269,5 +269,8 @@ $RECYCLE.BIN/
 # Local scratch / smoke renders (not for git)
 /tmp/
 
+# Local Gaussian-splat / Assimp demos and assets (not for git)
+/Demos/
+
 # Official POVWIN editor DLLs (not AGPL; local cache)
 /shipped_dll/
